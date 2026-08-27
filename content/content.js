@@ -66,9 +66,11 @@
     // 初始化音频播放器
     AudioPlayer.init(state.settings);
 
-    // 如果字幕已启用，自动获取和翻译字幕
+    // 如果字幕已启用，延迟加载以等待播放器和 Main World 桥接脚本就绪
     if (state.settings.subtitleEnabled) {
-      await loadSubtitles();
+      setTimeout(() => {
+        loadSubtitles();
+      }, 3000);
     }
 
     state.initialized = true;

@@ -1,8 +1,12 @@
 /**
- * YouTubeDubbingQ - Main World 终极拦截与桥接脚本 (v5)
- * 1. 全局 Fetch / XHR 劫持：自动捕获播放器发出的所有 /api/timedtext 原始字幕响应
- * 2. 括号匹配算法 (Bracket Matcher)：100% 精确提取页面内嵌的深度嵌套 captionTracks
- * 3. 多通道 DOM 同步与 CustomEvent 调度
+ * YouTubeDubbingQ - Main World 桥接脚本 (v6 - 纯 DOM 数据交换)
+ * 
+ * 关键设计决策：
+ * - Chrome MV3 中 MAIN world 与 ISOLATED world 共享 DOM，但 CustomEvent.detail 的
+ *   对象跨世界传递可能因 Chrome 安全策略被阻止。
+ * - 因此本版本完全不依赖 CustomEvent.detail 传递复杂对象。
+ * - 所有数据通过 DOM 节点的 textContent (纯字符串) 交换，100% 可靠。
+ * - 使用 MutationObserver 监听 DOM 变化触发回调，替代事件通信。
  */
 
 (function () {
@@ -11,63 +15,70 @@
   if (window.__YDQ_BRIDGE_INITIALIZED__) return;
   window.__YDQ_BRIDGE_INITIALIZED__ = true;
 
-  console.log('[YDQ Bridge] Main World 终极桥接与拦截引擎已启动');
+  console.log('[YDQ Bridge] Main World 脚本已初始化 (v6 纯 DOM 交换模式)');
 
-  // ============= 1. 网络请求拦截器 (自动截获 timedtext) =============
+  // ============= DOM 数据存储节点 =============
 
-  function cacheSubtitleText(url, text) {
-    if (!text || !text.trim()) return;
-
-    let store = document.getElementById('ydq-captured-subtitle-store');
-    if (!store) {
-      store = document.createElement('script');
-      store.id = 'ydq-captured-subtitle-store';
-      store.type = 'text/plain';
-      store.style.display = 'none';
-      (document.head || document.documentElement).appendChild(store);
+  function getOrCreateStore(id) {
+    let el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = id;
+      el.style.display = 'none';
+      (document.body || document.documentElement).appendChild(el);
     }
-
-    store.textContent = text;
-    store.setAttribute('data-url', url);
-    store.setAttribute('data-time', Date.now().toString());
-    console.log('[YDQ Bridge] ✓ 成功拦截并缓存播放器 timedtext 字幕响应！');
+    return el;
   }
 
-  // 拦截 window.fetch
+  // ============= Fetch / XHR 网络拦截器 =============
+
   const originalFetch = window.fetch;
   window.fetch = async function (...args) {
     const response = await originalFetch.apply(this, args);
     try {
       const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-      if (url && url.includes('/api/timedtext')) {
+      if (url && (url.includes('/api/timedtext') || url.includes('timedtext'))) {
         const clone = response.clone();
-        clone.text().then((text) => cacheSubtitleText(url, text)).catch(() => {});
+        clone.text().then((text) => {
+          if (text && text.trim()) {
+            const store = getOrCreateStore('ydq-intercepted-subtitle');
+            store.textContent = text;
+            store.setAttribute('data-url', url);
+            store.setAttribute('data-time', Date.now().toString());
+            console.log('[YDQ Bridge] ✓ 已拦截 fetch timedtext 响应:', url.substring(0, 80));
+          }
+        }).catch(() => {});
       }
     } catch (e) {}
     return response;
   };
 
-  // 拦截 XMLHttpRequest
-  const originalXHROpen = XMLHttpRequest.prototype.open;
-  const originalXHRSend = XMLHttpRequest.prototype.send;
+  const origXHROpen = XMLHttpRequest.prototype.open;
+  const origXHRSend = XMLHttpRequest.prototype.send;
 
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     this._ydqUrl = url;
-    return originalXHROpen.apply(this, [method, url, ...rest]);
+    return origXHROpen.apply(this, [method, url, ...rest]);
   };
 
   XMLHttpRequest.prototype.send = function (...args) {
     this.addEventListener('load', function () {
       try {
-        if (this._ydqUrl && this._ydqUrl.includes('/api/timedtext')) {
-          cacheSubtitleText(this._ydqUrl, this.responseText);
+        if (this._ydqUrl && (this._ydqUrl.includes('/api/timedtext') || this._ydqUrl.includes('timedtext'))) {
+          if (this.responseText && this.responseText.trim()) {
+            const store = getOrCreateStore('ydq-intercepted-subtitle');
+            store.textContent = this.responseText;
+            store.setAttribute('data-url', this._ydqUrl);
+            store.setAttribute('data-time', Date.now().toString());
+            console.log('[YDQ Bridge] ✓ 已拦截 XHR timedtext 响应');
+          }
         }
       } catch (e) {}
     });
-    return originalXHRSend.apply(this, args);
+    return origXHRSend.apply(this, args);
   };
 
-  // ============= 2. 括号匹配算法 (Bracket Matcher) =============
+  // ============= 括号匹配算法 =============
 
   function extractJsonArray(text, key) {
     if (!text) return null;
@@ -84,29 +95,17 @@
     for (let i = startIdx; i < text.length; i++) {
       const char = text[i];
 
-      if (escape) {
-        escape = false;
-        continue;
-      }
-
-      if (char === '\\') {
-        escape = true;
-        continue;
-      }
-
-      if (char === '"') {
-        inString = !inString;
-        continue;
-      }
+      if (escape) { escape = false; continue; }
+      if (char === '\\') { escape = true; continue; }
+      if (char === '"') { inString = !inString; continue; }
 
       if (!inString) {
         if (char === '[') depth++;
         else if (char === ']') {
           depth--;
           if (depth === 0) {
-            const jsonStr = text.substring(startIdx, i + 1);
             try {
-              return JSON.parse(jsonStr);
+              return JSON.parse(text.substring(startIdx, i + 1));
             } catch (e) {
               return null;
             }
@@ -114,73 +113,65 @@
         }
       }
     }
-
     return null;
   }
 
-  // ============= 3. 提取字幕轨 =============
-
-  function syncTracksToDOM(tracks) {
-    if (!tracks || !Array.isArray(tracks) || tracks.length === 0) return;
-
-    let container = document.getElementById('ydq-caption-tracks-store');
-    if (!container) {
-      container = document.createElement('script');
-      container.id = 'ydq-caption-tracks-store';
-      container.type = 'application/json';
-      container.style.display = 'none';
-      (document.head || document.documentElement).appendChild(container);
-    }
-
-    container.textContent = JSON.stringify(tracks);
-  }
+  // ============= 字幕轨道提取核心 =============
 
   function extractCaptionTracks() {
-    let tracks = null;
     const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
 
-    // 通道 1: 播放器 getOption
+    // 通道 1: player.getOption('captions', 'tracklist')
     if (player && typeof player.getOption === 'function') {
       try {
         const tracklist = player.getOption('captions', 'tracklist');
         if (Array.isArray(tracklist) && tracklist.length > 0) {
           const valid = tracklist.map((t) => ({
-            baseUrl: t.baseUrl || t.url,
-            languageCode: t.languageCode || t.lang || (t.vssId ? t.vssId.replace(/^[a-z]\./, '') : 'en'),
-            name: { simpleText: t.name || t.displayName || t.languageName || t.name_locale || '' },
-            kind: t.kind || (t.vssId?.startsWith('a.') ? 'asr' : ''),
-            vssId: t.vssId,
+            baseUrl: t.baseUrl || t.url || '',
+            languageCode: t.languageCode || t.lang || '',
+            name: t.name || t.displayName || t.languageName || '',
+            kind: t.kind || (t.vssId && t.vssId.startsWith('a.') ? 'asr' : ''),
           })).filter((t) => !!t.baseUrl);
-          if (valid.length > 0) {
-            syncTracksToDOM(valid);
-            return valid;
-          }
+          if (valid.length > 0) return valid;
         }
       } catch (e) {}
     }
 
-    // 通道 2: 播放器 getPlayerResponse
+    // 通道 2: player.getPlayerResponse()
     if (player && typeof player.getPlayerResponse === 'function') {
       try {
         const resp = player.getPlayerResponse();
-        const list = resp?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        const list = resp && resp.captions && resp.captions.playerCaptionsTracklistRenderer &&
+                     resp.captions.playerCaptionsTracklistRenderer.captionTracks;
         if (Array.isArray(list) && list.length > 0) {
-          syncTracksToDOM(list);
-          return list;
+          return list.map((t) => ({
+            baseUrl: t.baseUrl || '',
+            languageCode: t.languageCode || '',
+            name: (t.name && t.name.simpleText) || (t.name && t.name.runs && t.name.runs[0] && t.name.runs[0].text) || '',
+            kind: t.kind || '',
+          })).filter((t) => !!t.baseUrl);
         }
       } catch (e) {}
     }
 
-    // 通道 3: window.ytInitialPlayerResponse
-    if (window.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
-      const list = window.ytInitialPlayerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
-      if (Array.isArray(list) && list.length > 0) {
-        syncTracksToDOM(list);
-        return list;
+    // 通道 3: ytInitialPlayerResponse
+    try {
+      const ytipr = window.ytInitialPlayerResponse;
+      if (ytipr && ytipr.captions && ytipr.captions.playerCaptionsTracklistRenderer &&
+          ytipr.captions.playerCaptionsTracklistRenderer.captionTracks) {
+        const list = ytipr.captions.playerCaptionsTracklistRenderer.captionTracks;
+        if (Array.isArray(list) && list.length > 0) {
+          return list.map((t) => ({
+            baseUrl: t.baseUrl || '',
+            languageCode: t.languageCode || '',
+            name: (t.name && t.name.simpleText) || '',
+            kind: t.kind || '',
+          })).filter((t) => !!t.baseUrl);
+        }
       }
-    }
+    } catch (e) {}
 
-    // 通道 4: 扫描页面所有脚本，使用括号匹配算法提取
+    // 通道 4: 页面 script 标签 + 括号匹配
     try {
       const scripts = document.querySelectorAll('script');
       for (const s of scripts) {
@@ -188,8 +179,12 @@
         if (text && text.includes('captionTracks')) {
           const extracted = extractJsonArray(text, '"captionTracks"');
           if (Array.isArray(extracted) && extracted.length > 0) {
-            syncTracksToDOM(extracted);
-            return extracted;
+            return extracted.map((t) => ({
+              baseUrl: t.baseUrl || '',
+              languageCode: t.languageCode || '',
+              name: (t.name && (t.name.simpleText || (t.name.runs && t.name.runs[0] && t.name.runs[0].text))) || '',
+              kind: t.kind || '',
+            })).filter((t) => !!t.baseUrl);
           }
         }
       }
@@ -198,87 +193,75 @@
     return null;
   }
 
-  // 通道 5: Innertube API 官方通道
-  async function fetchTracksViaInnertube(videoId) {
-    if (!videoId) return null;
-    try {
-      const apiKey = window.ytcfg?.get?.('INNERTUBE_API_KEY');
-      const context = window.ytcfg?.get?.('INNERTUBE_CONTEXT') || {
-        client: { clientName: 'WEB', clientVersion: '2.20240101.00.00' },
-      };
+  // ============= 周期性写入 DOM =============
 
-      if (!apiKey) return null;
-
-      const url = `https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          videoId,
-          context,
-          playbackContext: {
-            contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' },
-          },
-        }),
-      });
-
-      if (!response.ok) return null;
-
-      const data = await response.json();
-      const list = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (Array.isArray(list) && list.length > 0) {
-        syncTracksToDOM(list);
-        return list;
+  function syncTracksToDOM() {
+    const tracks = extractCaptionTracks();
+    if (tracks && tracks.length > 0) {
+      const store = getOrCreateStore('ydq-caption-tracks');
+      const json = JSON.stringify(tracks);
+      if (store.textContent !== json) {
+        store.textContent = json;
+        store.setAttribute('data-time', Date.now().toString());
+        console.log('[YDQ Bridge] ✓ 字幕轨道已同步到 DOM (' + tracks.length + ' 个轨道)');
       }
-    } catch (e) {}
-
-    return null;
+    }
   }
 
-  // 周期性探测
-  setInterval(() => {
-    extractCaptionTracks();
-  }, 1000);
+  // 每秒探测并同步
+  setInterval(syncTracksToDOM, 1000);
+  // 初始延迟执行
+  setTimeout(syncTracksToDOM, 500);
+  setTimeout(syncTracksToDOM, 1500);
+  setTimeout(syncTracksToDOM, 3000);
 
-  // CustomEvent 通信
-  document.addEventListener('YDQ_EVENT_REQUEST_TRACKS', async (e) => {
-    const videoId = e.detail?.videoId;
-    let tracks = extractCaptionTracks();
-    if (!tracks && videoId) {
-      tracks = await fetchTracksViaInnertube(videoId);
+  // ============= 监听拉取字幕的指令 =============
+  // Content Script 在 'ydq-fetch-request' DOM 节点写入 URL
+  // Main World 监听到后去 fetch 并写入 'ydq-fetch-response' 
+
+  const observer = new MutationObserver(() => {
+    const reqNode = document.getElementById('ydq-fetch-request');
+    if (!reqNode) return;
+
+    const url = reqNode.getAttribute('data-url');
+    const reqId = reqNode.getAttribute('data-req-id');
+    const processed = reqNode.getAttribute('data-processed');
+
+    if (url && reqId && processed !== reqId) {
+      reqNode.setAttribute('data-processed', reqId);
+
+      fetch(url, { credentials: 'include' })
+        .then((resp) => {
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          return resp.text();
+        })
+        .then((text) => {
+          const respNode = getOrCreateStore('ydq-fetch-response');
+          respNode.textContent = text;
+          respNode.setAttribute('data-req-id', reqId);
+          respNode.setAttribute('data-success', 'true');
+          respNode.setAttribute('data-time', Date.now().toString());
+        })
+        .catch((err) => {
+          const respNode = getOrCreateStore('ydq-fetch-response');
+          respNode.textContent = '';
+          respNode.setAttribute('data-req-id', reqId);
+          respNode.setAttribute('data-success', 'false');
+          respNode.setAttribute('data-error', err.message);
+          respNode.setAttribute('data-time', Date.now().toString());
+        });
     }
-    if (tracks) {
-      syncTracksToDOM(tracks);
-    }
-    document.dispatchEvent(
-      new CustomEvent('YDQ_EVENT_RESPONSE_TRACKS', {
-        detail: { tracks: tracks || [] },
-      })
-    );
   });
 
-  // 代理拉取字幕
-  document.addEventListener('YDQ_EVENT_FETCH_SUBTITLE', async (e) => {
-    const { requestId, url } = e.detail || {};
-    if (!requestId || !url) return;
+  // 开始观察
+  function startObserving() {
+    const target = document.body || document.documentElement;
+    observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-req-id'] });
+  }
 
-    try {
-      const response = await fetch(url, { credentials: 'include' });
-      if (!response.ok) {
-        throw new Error(`HTTP 状态码 ${response.status}`);
-      }
-      const text = await response.text();
-      document.dispatchEvent(
-        new CustomEvent('YDQ_EVENT_FETCH_SUBTITLE_DONE', {
-          detail: { requestId, success: true, text },
-        })
-      );
-    } catch (err) {
-      document.dispatchEvent(
-        new CustomEvent('YDQ_EVENT_FETCH_SUBTITLE_DONE', {
-          detail: { requestId, success: false, error: err.message },
-        })
-      );
-    }
-  });
+  if (document.body) {
+    startObserving();
+  } else {
+    document.addEventListener('DOMContentLoaded', startObserving);
+  }
 })();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTubeDubbingQ",
-  "version": "2026.8.27.2335",
+  "version": "2026.8.27.2342",
   "description": "YouTube 视频 AI 双语字幕翻译 + 实时中文配音",
   "icons": {
     "16": "icons/icon16.png",
@@ -71,5 +71,5 @@
       ]
     }
   ],
-  "version_name": "v2026.08.27.2335 (2026-08-27 23:35:41)"
+  "version_name": "v2026.08.27.2342 (2026-08-27 23:42:23)"
 }
