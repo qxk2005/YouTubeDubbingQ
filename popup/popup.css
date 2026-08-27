@@ -549,10 +549,31 @@ input[type="checkbox"]:checked + .switch-slider::after {
   margin-bottom: 4px;
 }
 
-.about-version {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.35);
+.about-version-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   margin-bottom: 16px;
+}
+
+.version-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  background: rgba(255, 221, 0, 0.12);
+  border: 1px solid rgba(255, 221, 0, 0.3);
+  color: #FFDD00;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  font-family: monospace, sans-serif;
+}
+
+.build-time-tag {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.45);
+  font-family: monospace, sans-serif;
 }
 
 .about-links {

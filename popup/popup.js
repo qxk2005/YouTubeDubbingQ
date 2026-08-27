@@ -274,7 +274,43 @@
     }, 2000);
   }
 
+  // ============= 版本信息渲染 =============
+
+  function renderVersionInfo() {
+    try {
+      const manifest = chrome.runtime.getManifest();
+      const versionName = manifest.version_name || ('v' + manifest.version);
+      
+      // 头部版本简写 (如 v2026.08.27.2325)
+      const headerVersionElem = document.getElementById('header-version');
+      if (headerVersionElem) {
+        const shortMatch = versionName.match(/(v\d{4}\.\d{2}\.\d{2}\.\d{4})/i);
+        headerVersionElem.textContent = shortMatch ? shortMatch[1] : ('v' + manifest.version);
+      }
+
+      // 关于面板详细版本与构建时间
+      const aboutVersionTag = document.getElementById('about-version-tag');
+      const aboutBuildTime = document.getElementById('about-build-time');
+
+      if (aboutVersionTag) {
+        aboutVersionTag.textContent = versionName;
+      }
+
+      if (aboutBuildTime) {
+        const timeMatch = versionName.match(/\((.*?)\)/);
+        if (timeMatch) {
+          aboutBuildTime.textContent = '最后代码时间: ' + timeMatch[1];
+        } else {
+          aboutBuildTime.textContent = 'Chrome 内部版本: ' + manifest.version;
+        }
+      }
+    } catch (e) {
+      console.warn('[YDQ Popup] 无法获取版本信息:', e);
+    }
+  }
+
   // ============= 初始化 =============
 
   loadSettings();
+  renderVersionInfo();
 })();
