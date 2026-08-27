@@ -141,10 +141,29 @@
       return;
     }
 
+    // 检查是否有翻译内容（至少部分翻译完成）
+    const hasTranslation = state.subtitles.some(s => s.zhText && s.zhText.trim());
+    if (!hasTranslation) {
+      Toolbar.showToast('请等待字幕翻译完成后再开启配音', 'error');
+      return;
+    }
+
     try {
-      Toolbar.showToast('正在启动配音...', 'info');
+      Toolbar.showToast('正在准备配音...', 'info');
+
+      // 智能分段
+      const segments = SegmentManager.segmentSubtitles(state.subtitles);
+      console.log(`[YDQ] 字幕分段完成: ${segments.length} 个段落`);
+
       await TTSManager.enable();
       AudioPlayer.enable();
+
+      // 预生成前 2 个段落的音频
+      if (segments.length > 0) {
+        Toolbar.showToast('正在生成配音...', 'info');
+        await TTSManager.prefetchSegments(segments[0].startIndex);
+      }
+
       Toolbar.showToast('配音已启动', 'success');
     } catch (e) {
       console.error('[YDQ] 配音启动失败:', e);
@@ -158,6 +177,7 @@
   function stopDubbing() {
     TTSManager.disable();
     AudioPlayer.disable();
+    SegmentManager.clear();
     Toolbar.showToast('配音已关闭', 'info');
   }
 
@@ -264,6 +284,7 @@
     TTSManager.disable();
     TTSManager.clearCache();
     AudioPlayer.disable();
+    SegmentManager.clear();
 
     state.subtitles = [];
     state.initialized = false;

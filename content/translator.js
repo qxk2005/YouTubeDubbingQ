@@ -129,21 +129,25 @@ const Translator = {
    */
   async _translateBatch(batch, config) {
     const subtitleText = batch
-      .map((sub) => `${sub.index}|${sub.text}`)
+      .map((sub) => {
+        const durationSec = ((sub.endMs - sub.startMs) / 1000).toFixed(1);
+        return `${sub.index}|${durationSec}s|${sub.text}`;
+      })
       .join('\n');
 
-    const prompt = `你是一个专业的视频字幕翻译员。请将以下视频字幕翻译成精炼流畅的简体中文。
+    const prompt = `你是一个专业的视频字幕翻译员兼配音导演。请将以下视频字幕翻译成精炼流畅的简体中文。
 
-要求：
-1. 每条中文翻译字数尽量精炼克制，发音时长匹配原视频句长，以便配音同步
-2. 翻译要口语化、自然流畅，适合语音朗读
-3. 忠于原意，不要多余解释
-4. 直接返回JSON数组格式，不要包含任何Markdown标记或多余文本
+关键要求：
+1. 每条翻译的中文字数必须严格控制，使中文朗读时长匹配对应的时间窗口
+2. 参考标准：中文正常语速约每秒 4 个字（含标点）。例如 3.0s 的句子应翻译为约 12 个字
+3. 翻译要口语化、自然流畅，适合语音朗读，句间衔接要连贯
+4. 忠于原意但可以适当精简或改写以匹配时长
+5. 直接返回 JSON 数组格式，不要包含任何 Markdown 标记
 
-字幕列表（每行格式：序号|原文）：
+字幕列表（格式：序号|时长|原文）：
 ${subtitleText}
 
-返回格式示例：[{"index": 0, "zh": "翻译内容"}]`;
+返回格式：[{"index": 0, "zh": "翻译内容"}]`;
 
     const url = `${config.apiBaseUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
