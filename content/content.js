@@ -149,7 +149,15 @@
     }
 
     try {
-      Toolbar.showToast('正在准备配音...', 'info');
+      const video = document.querySelector('video');
+      const wasPlaying = video && !video.paused;
+
+      // 暂停视频，等配音准备好
+      if (video && wasPlaying) {
+        video.pause();
+      }
+
+      Toolbar.showToast('正在准备配音，请稍候...', 'info');
 
       // 智能分段
       const segments = SegmentManager.segmentSubtitles(state.subtitles);
@@ -158,9 +166,8 @@
       await TTSManager.enable();
       AudioPlayer.enable();
 
-      // 从当前播放位置开始预加载（而非从头开始）
+      // 从当前播放位置开始预加载
       if (segments.length > 0) {
-        const video = document.querySelector('video');
         const currentTimeMs = video ? video.currentTime * 1000 : 0;
 
         // 找到当前时间所在或之后最近的段落
@@ -172,15 +179,23 @@
           }
         }
 
-        console.log(`[YDQ] 从段落 ${startSegment.startIndex} 开始预加载 (当前时间: ${(currentTimeMs/1000).toFixed(1)}s)`);
-        Toolbar.showToast('正在生成配音...', 'info');
+        console.log(`[YDQ] 从段落 ${startSegment.startIndex} 开始预加载 (当前: ${(currentTimeMs/1000).toFixed(1)}s)`);
+        Toolbar.showToast('正在生成配音音频...', 'info');
         await TTSManager.prefetchSegments(startSegment.startIndex);
       }
 
-      Toolbar.showToast('配音已启动', 'success');
+      Toolbar.showToast('配音已就绪，开始播放！', 'success');
+
+      // 恢复视频播放
+      if (video && wasPlaying) {
+        video.play();
+      }
     } catch (e) {
       console.error('[YDQ] 配音启动失败:', e);
       Toolbar.showToast(`配音启动失败: ${e.message}`, 'error');
+      // 出错也要恢复播放
+      const video = document.querySelector('video');
+      if (video) video.play();
     }
   }
 
