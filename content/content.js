@@ -148,11 +148,7 @@
     }
 
     try {
-      // 智能分段
-      const segments = SegmentManager.segmentSubtitles(state.subtitles);
-      console.log(`[YDQ] 字幕分段完成: ${segments.length} 个段落`);
-
-      // 启用 TTS 和播放器（SpeechSynthesis 即时朗读，无需预生成）
+      // 逐句朗读模式：直接启用 TTS 和播放器
       await TTSManager.enable();
       AudioPlayer.enable();
 
@@ -169,7 +165,6 @@
   function stopDubbing() {
     TTSManager.disable();
     AudioPlayer.disable();
-    SegmentManager.clear();
     Toolbar.showToast('配音已关闭', 'info');
   }
 
@@ -276,7 +271,6 @@
     TTSManager.disable();
     TTSManager.clearCache();
     AudioPlayer.disable();
-    SegmentManager.clear();
 
     state.subtitles = [];
     state.initialized = false;
