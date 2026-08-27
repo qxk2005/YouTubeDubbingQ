@@ -1,14 +1,20 @@
 /**
- * YouTubeDubbingQ - YouTube 字幕获取模块 (v7 - Content Script 完全自主)
+ * YouTubeDubbingQ - YouTube 字幕获取模块 (v8 - 终极稳健版)
  * 
- * 核心策略变更：完全放弃跨世界通信，Content Script 自主完成所有工作。
+ * 核心认识：YouTube 已不支持匿名获取字幕，必须在用户认证环境中请求。
+ * 只有 MAIN world 脚本的 fetch 100% 携带用户 Cookie。
  * 
- * 三级获取策略：
- * 1. 从页面 HTML <script> 标签中提取 captionTracks (括号匹配算法)
- * 2. 从 DOM 中读取 Main World 桥接脚本同步的字幕轨道数据
- * 3. 自主调用 YouTube Innertube API (/youtubei/v1/player) 获取字幕轨道
+ * 五级获取策略 (按可靠性排序):
+ * 1. 网络拦截器缓存 (MAIN world 自动捕获 timedtext 响应)
+ * 2. DOM 桥接字幕轨 + MAIN world 代理 fetch (最可靠的主动获取)
+ * 3. 页面 <script> 标签括号匹配
+ * 4. Content Script 直接 Innertube API
+ * 5. Service Worker 代理 Innertube API
  * 
- * 字幕下载：直接由 Content Script fetch (host_permissions 保证 Cookie 携带)
+ * 字幕内容下载优先级:
+ * A. Main World DOM 代理 fetch (100% 携带 Cookie)
+ * B. Content Script 直接 fetch
+ * C. Service Worker 代理 fetch
  */
 
 const SubtitleFetcher = {
@@ -25,7 +31,6 @@ const SubtitleFetcher = {
     if (keyIdx === -1) return null;
     const startIdx = text.indexOf('[', keyIdx + key.length);
     if (startIdx === -1) return null;
-
     let depth = 0, inString = false, escape = false;
     for (let i = startIdx; i < text.length; i++) {
       const c = text[i];
@@ -46,59 +51,47 @@ const SubtitleFetcher = {
     return null;
   },
 
-  // ============= 从页面 HTML 提取 Innertube 配置 =============
+  // ============= Innertube 配置提取 =============
 
   _getInnertubeConfig() {
     try {
       const scripts = document.querySelectorAll('script');
-      let apiKey = null;
-      let clientVersion = null;
-      let clientName = 'WEB';
-
+      let apiKey = null, clientVersion = null;
       for (const s of scripts) {
         const text = s.textContent;
         if (!text) continue;
-
         if (!apiKey) {
-          const keyMatch = text.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
-          if (keyMatch) apiKey = keyMatch[1];
+          const m = text.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
+          if (m) apiKey = m[1];
         }
-
         if (!clientVersion) {
-          const verMatch = text.match(/"clientVersion"\s*:\s*"([^"]+)"/);
-          if (verMatch) clientVersion = verMatch[1];
+          const m = text.match(/"clientVersion"\s*:\s*"([^"]+)"/);
+          if (m) clientVersion = m[1];
         }
-
         if (apiKey && clientVersion) break;
       }
+      if (apiKey) return { apiKey, clientName: 'WEB', clientVersion: clientVersion || '2.20240101.00.00' };
+    } catch (e) {}
+    return null;
+  },
 
-      if (apiKey) {
-        return { apiKey, clientName, clientVersion: clientVersion || '2.20240101.00.00' };
+  // ============= 通道 0: 网络拦截器缓存 =============
+
+  _getInterceptedSubtitle() {
+    try {
+      const store = document.getElementById('ydq-intercepted-subtitle');
+      if (store && store.textContent && store.textContent.trim()) {
+        const parsed = this._parseRawSubtitle(store.textContent);
+        if (parsed && parsed.length > 0) {
+          console.log('[YDQ] ✓ 从网络拦截器获取到 ' + parsed.length + ' 条字幕');
+          return parsed;
+        }
       }
     } catch (e) {}
     return null;
   },
 
-  // ============= 通道 1: 从页面 <script> 标签提取 captionTracks =============
-
-  _extractTracksFromPageScripts() {
-    try {
-      const scripts = document.querySelectorAll('script');
-      for (const s of scripts) {
-        const text = s.textContent;
-        if (text && text.includes('captionTracks')) {
-          const list = this._extractJsonArray(text, '"captionTracks"');
-          if (Array.isArray(list) && list.length > 0) {
-            console.log('[YDQ] ✓ 从页面 script 标签提取到 ' + list.length + ' 条字幕轨');
-            return list;
-          }
-        }
-      }
-    } catch (e) {}
-    return [];
-  },
-
-  // ============= 通道 2: 从 DOM 直读 Main World 桥接数据 =============
+  // ============= 通道 1: DOM 桥接字幕轨 =============
 
   _readTracksFromBridgeDOM() {
     try {
@@ -114,17 +107,31 @@ const SubtitleFetcher = {
     return [];
   },
 
-  // ============= 通道 3: 直接调用 YouTube Innertube API =============
+  // ============= 通道 2: 页面 <script> 括号匹配 =============
+
+  _extractTracksFromPageScripts() {
+    try {
+      const scripts = document.querySelectorAll('script');
+      for (const s of scripts) {
+        const text = s.textContent;
+        if (text && text.includes('captionTracks')) {
+          const list = this._extractJsonArray(text, '"captionTracks"');
+          if (Array.isArray(list) && list.length > 0) {
+            console.log('[YDQ] ✓ 从 script 标签提取到 ' + list.length + ' 条字幕轨');
+            return list;
+          }
+        }
+      }
+    } catch (e) {}
+    return [];
+  },
+
+  // ============= 通道 3: Content Script 直接 Innertube API =============
 
   async _fetchTracksViaInnertubeAPI(videoId) {
     const config = this._getInnertubeConfig();
-    if (!config) {
-      console.warn('[YDQ] 未能从页面提取 Innertube 配置');
-      return [];
-    }
-
-    console.log('[YDQ] 正在通过 Innertube API 获取字幕轨道...');
-
+    if (!config) return [];
+    console.log('[YDQ] 正在通过 Content Script 直接调用 Innertube API...');
     try {
       const url = 'https://www.youtube.com/youtubei/v1/player?key=' + config.apiKey + '&prettyPrint=false';
       const response = await fetch(url, {
@@ -133,90 +140,134 @@ const SubtitleFetcher = {
         credentials: 'include',
         body: JSON.stringify({
           videoId: videoId,
-          context: {
-            client: {
-              clientName: config.clientName,
-              clientVersion: config.clientVersion,
-              hl: 'en',
-              gl: 'US',
-            },
-          },
+          context: { client: { clientName: config.clientName, clientVersion: config.clientVersion, hl: 'en', gl: 'US' } },
         }),
       });
-
-      if (!response.ok) {
-        console.warn('[YDQ] Innertube API 返回 HTTP ' + response.status);
-        return [];
-      }
-
+      if (!response.ok) { console.warn('[YDQ] Innertube HTTP ' + response.status); return []; }
       const data = await response.json();
-
-      // 检查是否可播放
-      if (data.playabilityStatus && data.playabilityStatus.status !== 'OK') {
-        console.warn('[YDQ] Innertube 播放状态:', data.playabilityStatus.status);
-      }
-
-      const tracks = data.captions &&
-                      data.captions.playerCaptionsTracklistRenderer &&
-                      data.captions.playerCaptionsTracklistRenderer.captionTracks;
-
+      const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
       if (Array.isArray(tracks) && tracks.length > 0) {
         console.log('[YDQ] ✓ Innertube API 返回 ' + tracks.length + ' 条字幕轨');
         return tracks;
       }
-
-      console.warn('[YDQ] Innertube API 返回中无 captionTracks');
-      return [];
-    } catch (e) {
-      console.error('[YDQ] Innertube API 调用异常:', e);
-      return [];
-    }
+      console.warn('[YDQ] Innertube 状态: ' + (data?.playabilityStatus?.status || 'unknown'));
+    } catch (e) { console.error('[YDQ] Innertube 异常:', e.message); }
+    return [];
   },
 
-  // ============= 检查拦截器缓存 =============
-
-  _getInterceptedSubtitle() {
-    try {
-      const store = document.getElementById('ydq-intercepted-subtitle');
-      if (store && store.textContent && store.textContent.trim()) {
-        const parsed = this._parseRawSubtitle(store.textContent);
-        if (parsed && parsed.length > 0) {
-          console.log('[YDQ] ✓ 从网络拦截器获取到 ' + parsed.length + ' 条字幕');
-          return parsed;
-        }
-      }
-    } catch (e) {}
-    return null;
-  },
   // ============= 通道 4: Service Worker 代理 Innertube API =============
 
   async _fetchTracksViaSW(videoId) {
     try {
       const config = this._getInnertubeConfig();
-      console.log('[YDQ] 正在通过 Service Worker 代理调用 Innertube API...');
-
+      console.log('[YDQ] 正在通过 Service Worker 代理...');
       const result = await chrome.runtime.sendMessage({
-        type: 'YDQ_FETCH_PLAYER_DATA',
-        videoId: videoId,
-        config: config || {},
+        type: 'YDQ_FETCH_PLAYER_DATA', videoId: videoId, config: config || {},
       });
-
-      if (result && result.success && Array.isArray(result.tracks)) {
+      if (result?.success && Array.isArray(result.tracks)) {
         console.log('[YDQ] ✓ SW 代理返回 ' + result.tracks.length + ' 条字幕轨');
         return result.tracks;
       }
-
-      if (result && result.error) {
-        console.warn('[YDQ] SW 代理错误:', result.error);
-      }
-    } catch (e) {
-      console.warn('[YDQ] SW 代理通信异常:', e.message);
-    }
+      if (result?.error) console.warn('[YDQ] SW 代理错误:', result.error);
+    } catch (e) { console.warn('[YDQ] SW 通信异常:', e.message); }
     return [];
   },
 
-  // ============= 优先级排序 =============
+  // ============= 字幕内容下载 (三重保障) =============
 
+  async _downloadSubtitleContent(baseUrl) {
+    // 方式 A: Main World DOM 代理 (最可靠 - 100% 携带 Cookie)
+    try {
+      const text = await this._fetchViaDOMProxy(baseUrl);
+      if (text && text.trim()) {
+        console.log('[YDQ] ✓ Main World 代理下载成功');
+        return text;
+      }
+    } catch (e) {
+      console.warn('[YDQ] Main World 代理下载失败:', e.message);
+    }
+
+    // 方式 B: Content Script 直接 fetch
+    try {
+      const response = await fetch(baseUrl, { credentials: 'include' });
+      if (response.ok) {
+        const text = await response.text();
+        if (text && text.trim()) {
+          console.log('[YDQ] ✓ Content Script 直接下载成功');
+          return text;
+        }
+      }
+    } catch (e) {
+      console.warn('[YDQ] Content Script 下载异常:', e.message);
+    }
+
+    // 方式 C: Service Worker 代理
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'YDQ_FETCH_URL', url: baseUrl });
+      if (result?.success && result.text) {
+        console.log('[YDQ] ✓ SW 代理下载成功');
+        return result.text;
+      }
+    } catch (e) {
+      console.warn('[YDQ] SW 代理下载异常:', e.message);
+    }
+
+    return null;
+  },
+
+  // ============= Main World DOM 代理 fetch =============
+
+  async _fetchViaDOMProxy(url) {
+    return new Promise((resolve, reject) => {
+      const reqId = 'r' + Date.now() + Math.random().toString(36).substr(2, 6);
+
+      // 创建请求节点
+      let reqNode = document.getElementById('ydq-fetch-request');
+      if (!reqNode) {
+        reqNode = document.createElement('div');
+        reqNode.id = 'ydq-fetch-request';
+        reqNode.style.display = 'none';
+        document.body.appendChild(reqNode);
+      }
+
+      let resolved = false;
+      const timeout = 8000;
+
+      const checkResponse = () => {
+        if (resolved) return;
+        const respNode = document.getElementById('ydq-fetch-response');
+        if (respNode && respNode.getAttribute('data-req-id') === reqId) {
+          resolved = true;
+          if (respNode.getAttribute('data-success') === 'true') {
+            resolve(respNode.textContent || '');
+          } else {
+            reject(new Error(respNode.getAttribute('data-error') || 'DOM 代理失败'));
+          }
+        }
+      };
+
+      // 轮询检查
+      const intervalId = setInterval(checkResponse, 150);
+
+      // 超时
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          clearInterval(intervalId);
+          reject(new Error('DOM 代理超时 (' + (timeout / 1000) + '秒)'));
+        }
+      }, timeout);
+
+      // 清理
+      setTimeout(() => clearInterval(intervalId), timeout + 1000);
+
+      // 发送请求
+      reqNode.setAttribute('data-url', url);
+      reqNode.setAttribute('data-req-id', reqId);
+    });
+  },
+
+  // ============= 轨道排序 =============
 
   _sortTracks(tracks) {
     return [...tracks].sort((a, b) => {
@@ -224,10 +275,10 @@ const SubtitleFetcher = {
       const langB = b.languageCode || '';
       const isEnA = langA === 'en' || langA.startsWith('en');
       const isEnB = langB === 'en' || langB.startsWith('en');
-      const isAsrA = a.kind === 'asr';
-      const isAsrB = b.kind === 'asr';
       if (isEnA && !isEnB) return -1;
       if (!isEnA && isEnB) return 1;
+      const isAsrA = a.kind === 'asr';
+      const isAsrB = b.kind === 'asr';
       if (!isAsrA && isAsrB) return -1;
       if (isAsrA && !isAsrB) return 1;
       return 0;
@@ -240,223 +291,122 @@ const SubtitleFetcher = {
     const videoId = this.getVideoId();
     if (!videoId) throw new Error('未检测到视频 ID');
 
-    console.log('[YDQ] ===== 开始字幕获取流程 (videoId: ' + videoId + ') =====');
+    console.log('[YDQ] ===== 开始字幕获取 v8 (videoId: ' + videoId + ') =====');
 
-    // 多轮尝试，每轮尝试所有通道
-    const maxRounds = 10;
+    const maxRounds = 12;
     const roundInterval = 1000;
 
     for (let round = 1; round <= maxRounds; round++) {
-      console.log('[YDQ] --- 第 ' + round + '/' + maxRounds + ' 轮探测 ---');
+      console.log('[YDQ] --- 第 ' + round + '/' + maxRounds + ' 轮 ---');
 
-      // 检查拦截器缓存
+      // 优先级 0: 拦截器缓存
       const intercepted = this._getInterceptedSubtitle();
       if (intercepted) return intercepted;
 
-      // 汇总所有通道获取到的轨道
+      // 收集轨道
       let tracks = [];
 
-      // 通道 1: 页面 script 括号匹配
-      if (tracks.length === 0) {
-        tracks = this._extractTracksFromPageScripts();
-      }
+      // 优先级 1: 页面 script 括号匹配 (每轮)
+      tracks = this._extractTracksFromPageScripts();
 
-      // 通道 2: DOM 桥接节点
-      if (tracks.length === 0) {
-        tracks = this._readTracksFromBridgeDOM();
-      }
+      // 优先级 2: DOM 桥接 (每轮)
+      if (!tracks.length) tracks = this._readTracksFromBridgeDOM();
 
-      // 通道 3: Content Script 直接调用 Innertube API (从第 2 轮开始)
-      if (tracks.length === 0 && round >= 2) {
-        tracks = await this._fetchTracksViaInnertubeAPI(videoId);
-      }
+      // 优先级 3: Content Script Innertube API (第 2 轮起)
+      if (!tracks.length && round >= 2) tracks = await this._fetchTracksViaInnertubeAPI(videoId);
 
-      // 通道 4: Service Worker 代理调用 Innertube API (从第 4 轮开始)
-      if (tracks.length === 0 && round >= 4) {
-        tracks = await this._fetchTracksViaSW(videoId);
-      }
+      // 优先级 4: SW 代理 Innertube API (第 5 轮起)
+      if (!tracks.length && round >= 5) tracks = await this._fetchTracksViaSW(videoId);
 
-      // 如果获取到了轨道，尝试下载字幕内容
+      // 有轨道则尝试下载
       if (tracks.length > 0) {
         const sorted = this._sortTracks(tracks);
         for (const track of sorted) {
           const baseUrl = track.baseUrl;
           if (!baseUrl) continue;
 
-          const langCode = track.languageCode || 'unknown';
-          const trackName = (track.name && (track.name.simpleText ||
+          const lang = track.languageCode || '?';
+          const name = (track.name && (track.name.simpleText ||
             (track.name.runs && track.name.runs[0] && track.name.runs[0].text))) || '';
-          console.log('[YDQ] 正在下载字幕: [' + langCode + '] ' + trackName);
+          console.log('[YDQ] 下载字幕: [' + lang + '] ' + name);
 
-          try {
-            // 方式 A: Content Script 直接 fetch
-            let rawText = null;
-            try {
-              const response = await fetch(baseUrl, { credentials: 'include' });
-              if (response.ok) {
-                rawText = await response.text();
-              } else {
-                console.warn('[YDQ] Content Script fetch HTTP ' + response.status + ', 尝试 SW 代理...');
-              }
-            } catch (fetchErr) {
-              console.warn('[YDQ] Content Script fetch 异常:', fetchErr.message, ', 尝试 SW 代理...');
-            }
-
-            // 方式 B: Service Worker 代理下载 (回退)
-            if (!rawText || !rawText.trim()) {
-              try {
-                const swResult = await chrome.runtime.sendMessage({
-                  type: 'YDQ_FETCH_URL',
-                  url: baseUrl,
-                });
-                if (swResult && swResult.success && swResult.text) {
-                  rawText = swResult.text;
-                  console.log('[YDQ] ✓ 通过 SW 代理下载到字幕内容');
-                }
-              } catch (swErr) {
-                console.warn('[YDQ] SW 代理下载失败:', swErr.message);
-              }
-            }
-
-            if (!rawText || !rawText.trim()) {
-              console.warn('[YDQ] 字幕下载内容为空');
-              continue;
-            }
-
+          const rawText = await this._downloadSubtitleContent(baseUrl);
+          if (rawText) {
             const subs = this._parseRawSubtitle(rawText);
             if (subs && subs.length > 0) {
-              console.log('[YDQ] ✓✓✓ 成功解析 ' + subs.length + ' 条字幕！(来自轨道: ' + langCode + ')');
+              console.log('[YDQ] ✓✓✓ 成功! ' + subs.length + ' 条字幕 (轨道: ' + lang + ')');
               return subs;
             }
-          } catch (err) {
-            console.warn('[YDQ] 字幕轨 [' + langCode + '] 处理异常:', err.message);
           }
         }
       }
 
-      // 等待下一轮
-      if (round < maxRounds) {
-        await new Promise((r) => setTimeout(r, roundInterval));
-      }
+      if (round < maxRounds) await new Promise((r) => setTimeout(r, roundInterval));
     }
 
-    throw new Error('经过 10 秒探测仍未获取到字幕。请确认: 1) 视频有 CC 字幕 2) YouTube 已登录');
+    throw new Error('12 秒内未获取到字幕。请确认视频有 CC 字幕且 YouTube 已登录');
   },
 
   // ============= 全能解析引擎 =============
 
   _parseRawSubtitle(rawText) {
-    const trimmed = rawText.trim();
-
-    if (trimmed.startsWith('{')) {
-      try {
-        const data = JSON.parse(trimmed);
-        const parsed = this._parseJSON3(data);
-        if (parsed.length > 0) return parsed;
-      } catch (e) {}
-    }
-
-    if (trimmed.startsWith('<')) {
-      try {
-        const parsed = this._parseXML(trimmed);
-        if (parsed.length > 0) return parsed;
-      } catch (e) {}
-    }
-
-    if (trimmed.includes('-->')) {
-      try {
-        const parsed = this._parseVTT(trimmed);
-        if (parsed.length > 0) return parsed;
-      } catch (e) {}
-    }
-
+    const t = rawText.trim();
+    if (t.startsWith('{')) try { const r = this._parseJSON3(JSON.parse(t)); if (r.length) return r; } catch (e) {}
+    if (t.startsWith('<')) try { const r = this._parseXML(t); if (r.length) return r; } catch (e) {}
+    if (t.includes('-->')) try { const r = this._parseVTT(t); if (r.length) return r; } catch (e) {}
     return [];
   },
 
   _parseJSON3(data) {
-    if (!data || !data.events) return [];
-    const subs = [];
-    let idx = 0;
+    if (!data?.events) return [];
+    const subs = []; let idx = 0;
     for (const ev of data.events) {
       if (!ev.segs) continue;
-      const text = ev.segs.map((s) => s.utf8 || '').join('').trim();
+      const text = ev.segs.map(s => s.utf8 || '').join('').trim();
       if (!text || text === '\n') continue;
-      subs.push({
-        text: this._decode(text),
-        startMs: ev.tStartMs || 0,
-        endMs: (ev.tStartMs || 0) + (ev.dDurationMs || 3000),
-        index: idx++,
-        zhText: '',
-      });
+      subs.push({ text: this._d(text), startMs: ev.tStartMs || 0, endMs: (ev.tStartMs || 0) + (ev.dDurationMs || 3000), index: idx++, zhText: '' });
     }
     return subs;
   },
 
-  _parseXML(xmlText) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xmlText, 'text/xml');
-    const subs = [];
-    let idx = 0;
-
-    const textNodes = doc.getElementsByTagName('text');
-    if (textNodes.length > 0) {
-      for (let i = 0; i < textNodes.length; i++) {
-        const n = textNodes[i];
-        const raw = (n.textContent || '').trim();
-        if (!raw) continue;
-        subs.push({
-          text: this._decode(raw),
-          startMs: Math.round(parseFloat(n.getAttribute('start') || '0') * 1000),
-          endMs: Math.round((parseFloat(n.getAttribute('start') || '0') + parseFloat(n.getAttribute('dur') || '3')) * 1000),
-          index: idx++, zhText: '',
-        });
-      }
-      if (subs.length > 0) return subs;
+  _parseXML(xml) {
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    const subs = []; let idx = 0;
+    const textN = doc.getElementsByTagName('text');
+    for (let i = 0; i < textN.length; i++) {
+      const n = textN[i]; const raw = (n.textContent || '').trim(); if (!raw) continue;
+      const s = parseFloat(n.getAttribute('start') || '0');
+      const d = parseFloat(n.getAttribute('dur') || '3');
+      subs.push({ text: this._d(raw), startMs: Math.round(s * 1000), endMs: Math.round((s + d) * 1000), index: idx++, zhText: '' });
     }
-
-    const pNodes = doc.getElementsByTagName('p');
-    for (let i = 0; i < pNodes.length; i++) {
-      const n = pNodes[i];
-      const raw = (n.textContent || '').trim();
-      if (!raw) continue;
-      const startMs = parseInt(n.getAttribute('t') || '0');
-      const durMs = parseInt(n.getAttribute('d') || '3000');
-      subs.push({
-        text: this._decode(raw), startMs, endMs: startMs + durMs, index: idx++, zhText: '',
-      });
+    if (subs.length) return subs;
+    const pN = doc.getElementsByTagName('p');
+    for (let i = 0; i < pN.length; i++) {
+      const n = pN[i]; const raw = (n.textContent || '').trim(); if (!raw) continue;
+      const t = parseInt(n.getAttribute('t') || '0'); const d = parseInt(n.getAttribute('d') || '3000');
+      subs.push({ text: this._d(raw), startMs: t, endMs: t + d, index: idx++, zhText: '' });
     }
     return subs;
   },
 
-  _parseVTT(vttText) {
-    const lines = vttText.split('\n');
-    const subs = [];
-    let idx = 0, i = 0;
+  _parseVTT(vtt) {
+    const lines = vtt.split('\n'); const subs = []; let idx = 0, i = 0;
     while (i < lines.length) {
       const m = lines[i].trim().match(/(\d{2}:)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}:)?(\d{2}):(\d{2})[.,](\d{3})/);
       if (m) {
         const p = (h, mi, s, ms) => (h ? parseInt(h) : 0) * 3600000 + parseInt(mi) * 60000 + parseInt(s) * 1000 + parseInt(ms);
-        const startMs = p(m[1], m[2], m[3], m[4]);
-        const endMs = p(m[5], m[6], m[7], m[8]);
-        i++;
-        const tl = [];
+        const startMs = p(m[1], m[2], m[3], m[4]); const endMs = p(m[5], m[6], m[7], m[8]);
+        i++; const tl = [];
         while (i < lines.length && lines[i].trim() !== '') { tl.push(lines[i].trim()); i++; }
         const text = tl.join(' ').replace(/<[^>]*>/g, '');
-        if (text) subs.push({ text: this._decode(text), startMs, endMs, index: idx++, zhText: '' });
+        if (text) subs.push({ text: this._d(text), startMs, endMs, index: idx++, zhText: '' });
       }
       i++;
     }
     return subs;
   },
 
-  _decode(str) {
-    if (!str) return '';
-    const t = document.createElement('textarea');
-    t.innerHTML = str;
-    return t.value;
-  },
+  _d(s) { if (!s) return ''; const t = document.createElement('textarea'); t.innerHTML = s; return t.value; },
 };
 
-if (typeof window !== 'undefined') {
-  window.SubtitleFetcher = SubtitleFetcher;
-}
+if (typeof window !== 'undefined') window.SubtitleFetcher = SubtitleFetcher;
