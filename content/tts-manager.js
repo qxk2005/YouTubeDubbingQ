@@ -33,6 +33,20 @@ const TTSManager = {
     this._selectedVoice = this._selectVoice();
     if (this._selectedVoice) {
       console.log(`[YDQ TTS] 已选语音: ${this._selectedVoice.name} (${this._selectedVoice.lang})`);
+
+      // 检查是否匹配到了用户期望的性别
+      const edgeVoice = this._settings.edgeVoice || 'zh-CN-XiaoxiaoNeural';
+      const wantsMale = edgeVoice.includes('Yunxi') || edgeVoice.includes('Yunjian') ||
+                        edgeVoice.includes('Yunyang') || edgeVoice.includes('Yunze');
+      const name = this._selectedVoice.name.toLowerCase();
+      const gotMale = name.includes('kangkang') || name.includes('yunxi') ||
+                      name.includes('male') || name.includes('yunjian');
+
+      if (wantsMale && !gotMale) {
+        if (typeof Toolbar !== 'undefined') {
+          Toolbar.showToast('提示：系统未安装中文男声语音包，将使用默认女声', 'info');
+        }
+      }
     }
   },
 
