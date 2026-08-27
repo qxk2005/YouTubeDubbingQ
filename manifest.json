@@ -52,7 +52,10 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["offscreen/offscreen.html"],
+      "resources": [
+        "offscreen/offscreen.html",
+        "content/page-bridge.js"
+      ],
       "matches": ["*://*.youtube.com/*"]
     }
   ]

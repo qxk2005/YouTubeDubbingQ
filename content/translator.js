@@ -132,13 +132,13 @@ const Translator = {
       .map((sub) => `${sub.index}|${sub.text}`)
       .join('\n');
 
-    const prompt = `你是一个专业的视频字幕翻译员。请将以下英文字幕翻译成简体中文。
+    const prompt = `你是一个专业的视频字幕翻译员。请将以下视频字幕翻译成精炼流畅的简体中文。
 
 要求：
-1. 每条翻译的中文字符数应尽量控制在原文英文单词数的1.2倍以内，确保配音时间长度接近原文
-2. 翻译要自然流畅，适合语音朗读
-3. 保持简洁精炼，避免冗长
-4. 直接返回JSON数组，不要包含任何其他内容
+1. 每条中文翻译字数尽量精炼克制，发音时长匹配原视频句长，以便配音同步
+2. 翻译要口语化、自然流畅，适合语音朗读
+3. 忠于原意，不要多余解释
+4. 直接返回JSON数组格式，不要包含任何Markdown标记或多余文本
 
 字幕列表（每行格式：序号|原文）：
 ${subtitleText}
@@ -171,24 +171,36 @@ ${subtitleText}
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      throw new Error(`API 请求失败 (${response.status}): ${errorText}`);
+      throw new Error(`AI API 请求失败 (${response.status}): ${errorText}`);
     }
 
-    const data = await response.json();
+    const rawText = await response.text();
+    if (!rawText || !rawText.trim()) {
+      throw new Error('AI API 返回空响应');
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      throw new Error(`AI API 响应解析失败: ${rawText.slice(0, 100)}`);
+    }
+
     const content = data.choices?.[0]?.message?.content?.trim();
 
     if (!content) {
-      throw new Error('API 返回空内容');
+      throw new Error('AI API 返回的选择内容为空');
     }
 
     // 解析 JSON 结果
     try {
-      // 尝试提取 JSON 数组（可能被 markdown 代码块包裹）
-      const jsonMatch = content.match(/\[[\s\S]*\]/);
+      // 尝试提取 JSON 数组（可能被 ```json ... ``` 包裹）
+      const cleanContent = content.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
+      const jsonMatch = cleanContent.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         return JSON.parse(jsonMatch[0]);
       }
-      return JSON.parse(content);
+      return JSON.parse(cleanContent);
     } catch (e) {
       console.error('[YDQ] 翻译结果 JSON 解析失败:', content);
       throw new Error('翻译结果格式错误');
@@ -205,7 +217,7 @@ ${subtitleText}
     const url = `${config.apiBaseUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
     const wordCount = sub.text.split(/\s+/).length;
-    const maxChars = Math.ceil(wordCount * 1.2);
+    const maxChars = Math.max(10, Math.ceil(wordCount * 1.5));
 
     const response = await fetch(url, {
       method: 'POST',
@@ -218,11 +230,11 @@ ${subtitleText}
         messages: [
           {
             role: 'system',
-            content: '你是一个视频字幕翻译员。直接返回翻译结果，不要任何解释。',
+            content: '你是一个视频字幕翻译员。直接返回精炼的简体中文翻译结果，不要任何解释。',
           },
           {
             role: 'user',
-            content: `将以下英文翻译为简体中文（控制在${maxChars}个中文字符以内）：\n${sub.text}`,
+            content: `将以下视频字幕翻译为精炼流畅的简体中文（尽量控制在${maxChars}个中文字符以内）：\n${sub.text}`,
           },
         ],
         temperature: 0.3,
@@ -235,7 +247,9 @@ ${subtitleText}
       throw new Error(`API 请求失败 (${response.status})`);
     }
 
-    const data = await response.json();
+    const raw = await response.text();
+    if (!raw) return sub.text;
+    const data = JSON.parse(raw);
     return data.choices?.[0]?.message?.content?.trim() || sub.text;
   },
 
