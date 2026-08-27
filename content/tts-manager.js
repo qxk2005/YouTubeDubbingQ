@@ -138,14 +138,20 @@ const TTSManager = {
           chrome.runtime.onMessage.removeListener(handler);
           if (message.error) {
             reject(new Error(message.error));
-          } else {
-            // 将 base64 转回 ArrayBuffer
+          } else if (message.directPlay) {
+            // 原生 SpeechSynthesis 直接朗读模式，音频已播放
+            // 返回一个特殊标记
+            resolve('__DIRECT_PLAY__');
+          } else if (message.audioBase64) {
+            // 有音频数据，转为 ArrayBuffer
             const binary = atob(message.audioBase64);
             const bytes = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) {
               bytes[i] = binary.charCodeAt(i);
             }
             resolve(bytes.buffer);
+          } else {
+            reject(new Error('TTS 返回空数据'));
           }
         }
       };

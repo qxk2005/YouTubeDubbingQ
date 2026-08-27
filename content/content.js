@@ -99,7 +99,15 @@
 
       Toolbar.showToast(`获取到 ${state.subtitles.length} 条字幕，开始翻译...`, 'info');
 
-      // 翻译字幕
+      // 立即启用字幕覆盖层（先显示英文字幕，中文翻译完一条即刻可见）
+      SubtitleOverlay.setSubtitles(state.subtitles);
+      SubtitleOverlay.enable();
+
+      // 同时设置到 TTS 和音频播放器（引用传递，后续 zhText 更新会自动同步）
+      TTSManager.setSubtitles(state.subtitles);
+      AudioPlayer.setSubtitles(state.subtitles);
+
+      // 翻译字幕（渐进式：翻译回调中 subtitles 对象的 zhText 会被直接更新）
       await Translator.translateAll(
         state.subtitles,
         {
@@ -113,16 +121,6 @@
       );
 
       Toolbar.showToast('字幕翻译完成！', 'success');
-
-      // 设置字幕数据到覆盖层
-      SubtitleOverlay.setSubtitles(state.subtitles);
-      SubtitleOverlay.enable();
-
-      // 设置字幕数据到 TTS 管理器
-      TTSManager.setSubtitles(state.subtitles);
-
-      // 设置字幕数据到音频播放器
-      AudioPlayer.setSubtitles(state.subtitles);
 
       // 如果配音也启用了，启动配音
       if (state.settings.dubbingEnabled) {
