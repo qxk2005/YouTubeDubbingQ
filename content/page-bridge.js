@@ -215,20 +215,24 @@
   setTimeout(syncTracksToDOM, 1500);
   setTimeout(syncTracksToDOM, 3000);
 
-  // ============= 监听拉取字幕的指令 =============
-  // Content Script 在 'ydq-fetch-request' DOM 节点写入 URL
-  // Main World 监听到后去 fetch 并写入 'ydq-fetch-response' 
+  // ============= 轮询监听 Content Script 的 fetch 指令 =============
+  // Content Script 在 'ydq-fetch-request' DOM 节点写入 URL 和 req-id
+  // Main World 轮询发现新 req-id 后 fetch 并写入 'ydq-fetch-response'
 
-  const observer = new MutationObserver(() => {
-    const reqNode = document.getElementById('ydq-fetch-request');
-    if (!reqNode) return;
+  let lastProcessedReqId = '';
 
-    const url = reqNode.getAttribute('data-url');
-    const reqId = reqNode.getAttribute('data-req-id');
-    const processed = reqNode.getAttribute('data-processed');
+  function checkFetchRequest() {
+    try {
+      const reqNode = document.getElementById('ydq-fetch-request');
+      if (!reqNode) return;
 
-    if (url && reqId && processed !== reqId) {
-      reqNode.setAttribute('data-processed', reqId);
+      const url = reqNode.getAttribute('data-url');
+      const reqId = reqNode.getAttribute('data-req-id');
+
+      if (!url || !reqId || reqId === lastProcessedReqId) return;
+
+      lastProcessedReqId = reqId;
+      console.log('[YDQ Bridge] 收到 fetch 代理请求:', url.substring(0, 80));
 
       fetch(url, { credentials: 'include' })
         .then((resp) => {
@@ -241,6 +245,7 @@
           respNode.setAttribute('data-req-id', reqId);
           respNode.setAttribute('data-success', 'true');
           respNode.setAttribute('data-time', Date.now().toString());
+          console.log('[YDQ Bridge] ✓ fetch 代理完成, 内容长度:', text.length);
         })
         .catch((err) => {
           const respNode = getOrCreateStore('ydq-fetch-response');
@@ -249,19 +254,12 @@
           respNode.setAttribute('data-success', 'false');
           respNode.setAttribute('data-error', err.message);
           respNode.setAttribute('data-time', Date.now().toString());
+          console.warn('[YDQ Bridge] ✗ fetch 代理失败:', err.message);
         });
-    }
-  });
-
-  // 开始观察
-  function startObserving() {
-    const target = document.body || document.documentElement;
-    observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-req-id'] });
+    } catch (e) {}
   }
 
-  if (document.body) {
-    startObserving();
-  } else {
-    document.addEventListener('DOMContentLoaded', startObserving);
-  }
+  // 每 200ms 轮询检查一次 fetch 请求
+  setInterval(checkFetchRequest, 200);
 })();
+
