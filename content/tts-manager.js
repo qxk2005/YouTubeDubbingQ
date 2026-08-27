@@ -1,26 +1,23 @@
 /**
- * YouTubeDubbingQ - TTS 配音管理模块 (v2 - 段落式)
+ * YouTubeDubbingQ - TTS 配音管理模块 (v3 - 直接朗读)
  * 
- * 核心变更：从逐句生成改为段落式生成
- * - 将段落中所有中文字幕合并为连贯文本
- * - 一次性生成段落语音（保证句间连贯）
- * - 按段落缓存和预加载
+ * 核心变更：
+ * - 移除 Offscreen Document 链路，直接在 Content Script 中使用 SpeechSynthesis
+ * - 按段落实时朗读，不预生成音频文件
+ * - 支持男/女声选择（映射到系统中文语音）
  */
 
 const TTSManager = {
-  // 段落音频缓存 (key: segmentStartIndex, value: ArrayBuffer | '__DIRECT_PLAY__')
-  _segmentCache: new Map(),
-
   _enabled: false,
   _subtitles: [],
   _settings: null,
-  _generating: false,
-  _prefetchAhead: 2,  // 预加载接下来 2 个段落
+  _currentUtterance: null,
+  _voicesLoaded: false,
+  _cachedVoices: [],
 
   init(settings) {
     this._settings = settings || {};
-    this._segmentCache.clear();
-    this._generating = false;
+    this._loadVoices();
   },
 
   setSubtitles(subtitles) {
@@ -29,205 +26,171 @@ const TTSManager = {
 
   async enable() {
     this._enabled = true;
-    await this._ensureOffscreen();
+    this._loadVoices();
   },
 
   disable() {
     this._enabled = false;
-    this._stopCurrentAudio();
-    this._segmentCache.clear();
-    this._generating = false;
-  },
-
-  async _ensureOffscreen() {
-    try {
-      await chrome.runtime.sendMessage({ type: 'YDQ_CREATE_OFFSCREEN' });
-    } catch (e) {
-      console.log('[YDQ TTS] Offscreen 请求:', e.message);
-    }
+    this.stop();
   },
 
   /**
-   * 计算段落的 TTS 语速
-   * 使语音总时长匹配段落的时间窗口
+   * 加载系统语音列表
    */
-  _calculateSegmentSpeed(mergedText, durationMs) {
-    if (!mergedText || durationMs <= 0) return 1.0;
+  _loadVoices() {
+    if (!window.speechSynthesis) return;
 
-    // 中文正常语速约 4 字/秒，估算自然朗读时长
-    const charCount = mergedText.replace(/[，。！？、；：,.!?;:\s]/g, '').length;
-    const estimatedMs = (charCount / 4) * 1000;
+    const loadFn = () => {
+      this._cachedVoices = window.speechSynthesis.getVoices();
+      if (this._cachedVoices.length > 0) {
+        this._voicesLoaded = true;
+        const zhVoices = this._cachedVoices.filter(v => v.lang.startsWith('zh'));
+        console.log('[YDQ TTS] 可用中文语音:', zhVoices.map(v => `${v.name} (${v.lang})`).join(', '));
+      }
+    };
 
-    const ratio = estimatedMs / durationMs;
-
-    // 限制调速范围 0.7x - 1.6x
-    return Math.max(0.7, Math.min(1.6, ratio));
+    loadFn();
+    window.speechSynthesis.addEventListener('voiceschanged', loadFn);
   },
 
   /**
-   * 生成段落的 TTS 音频
+   * 根据用户设置选择语音
+   * 将 Edge TTS 语音名映射到系统语音
+   */
+  _selectVoice() {
+    if (!this._voicesLoaded) this._loadVoices();
+
+    const voices = this._cachedVoices;
+    const edgeVoice = this._settings.edgeVoice || 'zh-CN-XiaoxiaoNeural';
+
+    // 判断用户选择的是男声还是女声
+    const isMale = edgeVoice.includes('Yunxi') || edgeVoice.includes('Yunjian') ||
+                   edgeVoice.includes('Yunyang');
+
+    // 在系统语音中查找匹配的中文语音
+    const zhVoices = voices.filter(v => v.lang === 'zh-CN' || v.lang.startsWith('zh'));
+
+    if (zhVoices.length === 0) {
+      console.warn('[YDQ TTS] 未找到中文语音，使用默认语音');
+      return null;
+    }
+
+    // 尝试按性别匹配
+    if (isMale) {
+      // 优先找男声关键词
+      const male = zhVoices.find(v =>
+        v.name.includes('Yunxi') || v.name.includes('Kangkang') ||
+        v.name.includes('Male') || v.name.includes('男')
+      );
+      if (male) return male;
+    } else {
+      // 优先找女声关键词
+      const female = zhVoices.find(v =>
+        v.name.includes('Xiaoxiao') || v.name.includes('Huihui') ||
+        v.name.includes('Yaoyao') || v.name.includes('Female') || v.name.includes('女')
+      );
+      if (female) return female;
+    }
+
+    // 都没匹配到，返回第一个中文语音
+    return zhVoices[0];
+  },
+
+  /**
+   * 朗读段落文本
    * @param {Object} segment 段落对象
-   * @returns {Promise<ArrayBuffer|string|null>}
+   * @returns {Promise<void>} 朗读完成时 resolve
    */
-  async _generateSegmentAudio(segment) {
-    const cacheKey = segment.startIndex;
-    if (this._segmentCache.has(cacheKey)) {
-      return this._segmentCache.get(cacheKey);
-    }
-
-    // 合并段落中的中文文本
-    const mergedText = SegmentManager.mergeSegmentText(segment);
-    if (!mergedText || mergedText.trim().length === 0) {
-      console.warn('[YDQ TTS] 段落无中文文本 (startIndex:', segment.startIndex, ')');
-      return null;
-    }
-
-    const speed = this._calculateSegmentSpeed(mergedText, segment.durationMs);
-    console.log(`[YDQ TTS] 生成段落音频: idx=${segment.startIndex}-${segment.endIndex}, ` +
-      `字数=${mergedText.length}, 时长=${(segment.durationMs/1000).toFixed(1)}s, 语速=${speed.toFixed(2)}x`);
-
-    try {
-      let audioBuffer;
-
-      if (this._settings.ttsEngine === 'doubao') {
-        audioBuffer = await this._requestTTS('doubao', mergedText, speed);
-      } else {
-        audioBuffer = await this._requestTTS('edge', mergedText, speed);
-      }
-
-      if (audioBuffer) {
-        this._segmentCache.set(cacheKey, audioBuffer);
-      }
-      return audioBuffer;
-    } catch (e) {
-      console.error(`[YDQ TTS] 段落音频生成失败:`, e.message);
-      return null;
-    }
-  },
-
-  /**
-   * 发送 TTS 请求到 Offscreen Document
-   */
-  _requestTTS(engine, text, speed) {
+  speakSegment(segment) {
     return new Promise((resolve, reject) => {
-      const requestId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-
-      const handler = (message) => {
-        if (message.type === 'YDQ_TTS_RESULT' && message.requestId === requestId) {
-          chrome.runtime.onMessage.removeListener(handler);
-          if (message.error) {
-            reject(new Error(message.error));
-          } else if (message.directPlay) {
-            resolve('__DIRECT_PLAY__');
-          } else if (message.audioBase64) {
-            const binary = atob(message.audioBase64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-              bytes[i] = binary.charCodeAt(i);
-            }
-            resolve(bytes.buffer);
-          } else {
-            reject(new Error('TTS 返回空数据'));
-          }
-        }
-      };
-
-      chrome.runtime.onMessage.addListener(handler);
-
-      const msg = {
-        type: 'YDQ_TTS_REQUEST',
-        requestId,
-        engine,
-        text,
-        speed,
-      };
-
-      if (engine === 'edge') {
-        msg.voice = this._settings.edgeVoice || 'zh-CN-XiaoxiaoNeural';
-      } else if (engine === 'doubao') {
-        msg.config = {
-          apiUrl: this._settings.doubaoApiUrl,
-          apiKey: this._settings.doubaoApiKey,
-          model: this._settings.doubaoModel,
-          voice: this._settings.doubaoVoice,
-        };
+      if (!this._enabled || !window.speechSynthesis) {
+        resolve();
+        return;
       }
 
-      chrome.runtime.sendMessage(msg);
+      // 停止之前的朗读
+      this.stop();
 
-      setTimeout(() => {
-        chrome.runtime.onMessage.removeListener(handler);
-        reject(new Error('TTS 请求超时 (30s)'));
-      }, 30000);
+      // 合并段落文本
+      const text = SegmentManager.mergeSegmentText(segment);
+      if (!text || text.trim().length === 0) {
+        resolve();
+        return;
+      }
+
+      // 计算语速
+      const speed = this._calculateSpeed(text, segment.durationMs);
+
+      console.log(`[YDQ TTS] 朗读段落 ${segment.startIndex}-${segment.endIndex}: ` +
+        `"${text.slice(0, 30)}..." (语速: ${speed.toFixed(2)}x)`);
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'zh-CN';
+      utterance.rate = speed;
+      utterance.pitch = 1.0;
+      utterance.volume = (this._settings.dubbingVolume || 100) / 100;
+
+      // 选择语音
+      const voice = this._selectVoice();
+      if (voice) {
+        utterance.voice = voice;
+        console.log(`[YDQ TTS] 使用语音: ${voice.name}`);
+      }
+
+      this._currentUtterance = utterance;
+
+      utterance.onend = () => {
+        this._currentUtterance = null;
+        resolve();
+      };
+
+      utterance.onerror = (e) => {
+        this._currentUtterance = null;
+        if (e.error !== 'canceled') {
+          console.warn('[YDQ TTS] 朗读错误:', e.error);
+        }
+        resolve(); // 不 reject，避免中断流程
+      };
+
+      window.speechSynthesis.speak(utterance);
     });
   },
 
   /**
-   * 获取段落音频（有缓存直接返回，无缓存则生成）
+   * 计算语速使朗读时长匹配段落时间窗口
    */
-  async getSegmentAudio(segment) {
-    if (!segment) return null;
-    const cacheKey = segment.startIndex;
-    if (this._segmentCache.has(cacheKey)) {
-      return this._segmentCache.get(cacheKey);
-    }
-    return await this._generateSegmentAudio(segment);
+  _calculateSpeed(text, durationMs) {
+    if (!text || durationMs <= 0) return 1.0;
+
+    const charCount = text.replace(/[，。！？、；：,.!?;:\s]/g, '').length;
+    const estimatedMs = (charCount / 4) * 1000; // 约 4 字/秒
+    const ratio = estimatedMs / durationMs;
+
+    return Math.max(0.7, Math.min(1.8, ratio));
   },
 
   /**
-   * 预加载段落
+   * 停止当前朗读
    */
-  async prefetchSegments(currentSegmentIndex) {
-    if (this._generating || !this._enabled) return;
-    this._generating = true;
-
-    try {
-      const segments = SegmentManager.getSegments();
-      // 找到当前段落在数组中的位置
-      let currentPos = segments.findIndex(s => s.startIndex === currentSegmentIndex);
-      if (currentPos === -1) currentPos = 0;
-
-      // 预加载当前 + 后续段落
-      for (let i = currentPos; i < Math.min(currentPos + this._prefetchAhead + 1, segments.length); i++) {
-        if (!this._enabled) break;
-        const seg = segments[i];
-        if (!this._segmentCache.has(seg.startIndex)) {
-          await this._generateSegmentAudio(seg);
-        }
-      }
-    } catch (e) {
-      console.error('[YDQ TTS] 预加载失败:', e);
+  stop() {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
     }
-
-    this._generating = false;
+    this._currentUtterance = null;
   },
 
   /**
-   * 时间更新回调（触发预加载）
+   * 是否正在朗读
    */
-  onTimeUpdate(currentTimeMs) {
-    if (!this._enabled) return;
-    const segment = SegmentManager.findSegmentAtTime(currentTimeMs);
-    if (segment) {
-      this.prefetchSegments(segment.startIndex);
-    }
+  isSpeaking() {
+    return window.speechSynthesis && window.speechSynthesis.speaking;
   },
 
-  _stopCurrentAudio() {
-    try {
-      chrome.runtime.sendMessage({ type: 'YDQ_STOP_AUDIO' });
-    } catch (e) {}
-  },
-
-  clearCache() {
-    this._segmentCache.clear();
-  },
-
+  clearCache() {},
   updateSettings(newSettings) {
     this._settings = { ...this._settings, ...newSettings };
   },
-
-  // 保持向后兼容
+  onTimeUpdate() {},
   trimCache() {},
 };
 

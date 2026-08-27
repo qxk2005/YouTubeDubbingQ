@@ -1,10 +1,10 @@
 /**
- * YouTubeDubbingQ - 音频播放控制模块 (v3 - 段落式播放)
+ * YouTubeDubbingQ - 音频播放控制模块 (v4 - 直接朗读)
  * 
- * 核心变更：从逐句播放改为段落式播放
- * - 段落音频在首句 startMs 时开始播放
- * - 段落播放期间不重复触发
- * - 音量直接赋值 + 持续维持
+ * v4 变更：
+ * - 移除 Offscreen Document 播放链路
+ * - 直接调用 TTSManager.speakSegment() 按段落朗读
+ * - 音量控制直接赋值 + 持续维持
  */
 
 const AudioPlayer = {
@@ -15,8 +15,7 @@ const AudioPlayer = {
   _rafId: null,
   _volumeEnforceInterval: null,
   _targetVideoVolume: null,
-  _playingSegmentIndex: -1,   // 当前正在播放的段落 startIndex
-  _lastCheckTimeMs: -1,
+  _playingSegmentIndex: -1,
 
   init(settings) {
     this._settings = settings || {};
@@ -47,7 +46,7 @@ const AudioPlayer = {
     this._stopPlaybackLoop();
     this._stopVolumeEnforcement();
     this._restoreVideoVolume();
-    this._stopCurrentAudio();
+    if (typeof TTSManager !== 'undefined') TTSManager.stop();
     this._unbindVideoEvents();
     this._playingSegmentIndex = -1;
   },
@@ -87,19 +86,18 @@ const AudioPlayer = {
   _startPlaybackLoop() {
     if (this._rafId) cancelAnimationFrame(this._rafId);
 
-    const playbackLoop = () => {
+    const loop = () => {
       if (!this._enabled) return;
 
       const video = document.querySelector('video');
       if (video && !video.paused) {
-        const currentTimeMs = video.currentTime * 1000;
-        this._checkAndPlaySegment(currentTimeMs);
+        this._checkAndPlaySegment(video.currentTime * 1000);
       }
 
-      this._rafId = requestAnimationFrame(playbackLoop);
+      this._rafId = requestAnimationFrame(loop);
     };
 
-    this._rafId = requestAnimationFrame(playbackLoop);
+    this._rafId = requestAnimationFrame(loop);
   },
 
   _stopPlaybackLoop() {
@@ -109,93 +107,35 @@ const AudioPlayer = {
     }
   },
 
-  /**
-   * 检查是否需要播放段落音频
-   */
   _checkAndPlaySegment(currentTimeMs) {
-    if (typeof SegmentManager === 'undefined') return;
+    if (typeof SegmentManager === 'undefined' || typeof TTSManager === 'undefined') return;
 
-    // 通知 TTS 预加载
-    if (typeof TTSManager !== 'undefined') {
-      TTSManager.onTimeUpdate(currentTimeMs);
-    }
-
-    // 查找当前时间所在的段落
     const segment = SegmentManager.findSegmentAtTime(currentTimeMs);
     if (!segment) return;
 
-    // 如果已在播放这个段落，不重复触发
+    // 已在播放此段落，不重复触发
     if (this._playingSegmentIndex === segment.startIndex) return;
 
-    // 触发条件：进入一个新段落（不管是从头还是中途进入）
-    // 这样即使用户在视频中间开启配音，也能播放当前段落
+    // 进入新段落 → 朗读
     this._playingSegmentIndex = segment.startIndex;
-    this._playSegmentAudio(segment);
+    TTSManager.speakSegment(segment);
   },
 
-  /**
-   * 播放段落音频
-   */
-  async _playSegmentAudio(segment) {
-    if (!this._enabled || typeof TTSManager === 'undefined') return;
-
-    console.log(`[YDQ Audio] 播放段落: idx=${segment.startIndex}-${segment.endIndex}`);
-
-    const audioData = await TTSManager.getSegmentAudio(segment);
-    if (!audioData) {
-      console.warn('[YDQ Audio] 段落无音频数据');
-      return;
-    }
-
-    // 直接朗读模式（SpeechSynthesis 已播放）
-    if (audioData === '__DIRECT_PLAY__') return;
-
-    // 检查在等待期间段落是否已变化
-    if (this._playingSegmentIndex !== segment.startIndex) return;
-
-    try {
-      const base64 = this._arrayBufferToBase64(audioData);
-      const volume = (this._settings.dubbingVolume || 100) / 100;
-
-      chrome.runtime.sendMessage({
-        type: 'YDQ_PLAY_AUDIO',
-        audioBase64: base64,
-        volume,
-      });
-    } catch (e) {
-      console.error('[YDQ Audio] 播放失败:', e);
-    }
-  },
-
-  _arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-      binary += String.fromCharCode.apply(null, chunk);
-    }
-    return btoa(binary);
-  },
-
-  _stopCurrentAudio() {
-    try {
-      chrome.runtime.sendMessage({ type: 'YDQ_STOP_AUDIO' });
-    } catch (e) {}
-  },
+  // ============= 视频事件 =============
 
   _bindVideoEvents() {
     const video = document.querySelector('video');
     if (!video) return;
 
-    this._onPause = () => this._stopCurrentAudio();
-    this._onPlay = () => { if (this._enabled) this._startPlaybackLoop(); };
+    this._onPause = () => {
+      if (typeof TTSManager !== 'undefined') TTSManager.stop();
+    };
+    this._onPlay = () => {
+      if (this._enabled) this._startPlaybackLoop();
+    };
     this._onSeeked = () => {
       this._playingSegmentIndex = -1;
-      this._stopCurrentAudio();
-      if (this._enabled && typeof TTSManager !== 'undefined') {
-        TTSManager.onTimeUpdate(video.currentTime * 1000);
-      }
+      if (typeof TTSManager !== 'undefined') TTSManager.stop();
     };
     this._onVolumeChange = () => {
       if (this._enabled && this._targetVideoVolume !== null) {
@@ -214,7 +154,6 @@ const AudioPlayer = {
   _unbindVideoEvents() {
     const video = document.querySelector('video');
     if (!video) return;
-
     if (this._onPause) video.removeEventListener('pause', this._onPause);
     if (this._onPlay) video.removeEventListener('play', this._onPlay);
     if (this._onSeeked) video.removeEventListener('seeked', this._onSeeked);
@@ -223,7 +162,6 @@ const AudioPlayer = {
 
   updateSettings(newSettings) {
     this._settings = { ...this._settings, ...newSettings };
-
     if (this._enabled && newSettings.originalVolume !== undefined) {
       const video = document.querySelector('video');
       if (video) this._setVideoVolume(video, newSettings.originalVolume / 100);
