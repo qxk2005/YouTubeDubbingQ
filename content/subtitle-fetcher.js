@@ -1,8 +1,9 @@
 /**
- * YouTubeDubbingQ - YouTube 字幕获取模块 (全能强化版 v4)
- * 1. DOM 隐藏节点直读 (0ms 无延迟)
- * 2. HTML5 video.textTracks 运行时 cues 提取 (绝对保底)
- * 3. XML (<text> 和 <p> 标签) / JSON3 / WebVTT 全能解析引擎
+ * YouTubeDubbingQ - YouTube 字幕获取模块 (全能强化版 v5)
+ * 1. 自动读取 Main World 拦截到的播放器 timedtext 真实字幕数据
+ * 2. 括号匹配算法 (Bracket Matcher) 从页面脚本提取 captionTracks
+ * 3. 0ms DOM 同步直读与 CustomEvent 通信
+ * 4. 支持 XML (<p> 和 <text> 标签) / JSON3 / WebVTT 全能解析
  */
 
 const SubtitleFetcher = {
@@ -16,7 +17,80 @@ const SubtitleFetcher = {
   },
 
   /**
-   * 通道 1: 从 DOM 隐藏节点直读 captionTracks (0ms 零开销)
+   * 括号匹配算法：精准提取包含嵌套数组的 JSON
+   * @param {string} text
+   * @param {string} key
+   * @returns {Array|null}
+   */
+  _extractJsonArray(text, key) {
+    if (!text) return null;
+    const keyIdx = text.indexOf(key);
+    if (keyIdx === -1) return null;
+
+    const startIdx = text.indexOf('[', keyIdx + key.length);
+    if (startIdx === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = startIdx; i < text.length; i++) {
+      const char = text[i];
+
+      if (escape) {
+        escape = false;
+        continue;
+      }
+
+      if (char === '\\') {
+        escape = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === '[') depth++;
+        else if (char === ']') {
+          depth--;
+          if (depth === 0) {
+            const jsonStr = text.substring(startIdx, i + 1);
+            try {
+              return JSON.parse(jsonStr);
+            } catch (e) {
+              return null;
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  },
+
+  /**
+   * 通道 0: 检查是否已有拦截器捕获到的原始字幕文本
+   * @returns {Array}
+   */
+  _getCapturedSubtitle() {
+    try {
+      const store = document.getElementById('ydq-captured-subtitle-store');
+      if (store && store.textContent && store.textContent.trim()) {
+        const parsed = this._parseRawSubtitle(store.textContent);
+        if (parsed && parsed.length > 0) {
+          console.log(`[YDQ] ✓ 直接从网络拦截器获取到 ${parsed.length} 条已捕获的字幕！`);
+          return parsed;
+        }
+      }
+    } catch (e) {}
+    return [];
+  },
+
+  /**
+   * 通道 1: 从 DOM 隐藏节点直读 captionTracks (0ms)
    * @returns {Array}
    */
   _readTracksFromDOMStore() {
@@ -33,7 +107,27 @@ const SubtitleFetcher = {
   },
 
   /**
-   * 通道 2: 通过 CustomEvent 主动向 Main World 请求并等待
+   * 通道 2: 扫描当前页面所有 <script> 标签并用括号匹配算法提取
+   * @returns {Array}
+   */
+  _extractTracksFromPageScripts() {
+    try {
+      const scripts = document.querySelectorAll('script');
+      for (const s of scripts) {
+        const text = s.textContent;
+        if (text && text.includes('captionTracks')) {
+          const list = this._extractJsonArray(text, '"captionTracks"');
+          if (Array.isArray(list) && list.length > 0) {
+            return list;
+          }
+        }
+      }
+    } catch (e) {}
+    return [];
+  },
+
+  /**
+   * 通道 3: 通过 CustomEvent 主动向 Main World 请求
    * @param {string} videoId
    * @returns {Promise<Array>}
    */
@@ -65,7 +159,7 @@ const SubtitleFetcher = {
   },
 
   /**
-   * 通过 CustomEvent 代理拉取字幕内容 (带凭证，不破坏签名)
+   * 代理拉取带签名的字幕 URL
    * @param {string} url
    * @returns {Promise<string>}
    */
@@ -97,47 +191,10 @@ const SubtitleFetcher = {
         if (!resolved) {
           resolved = true;
           document.removeEventListener('YDQ_EVENT_FETCH_SUBTITLE_DONE', handler);
-          reject(new Error('请求字幕内容超时 (10s)'));
+          reject(new Error('请求字幕内容超时'));
         }
       }, 10000);
     });
-  },
-
-  /**
-   * 通道 3 (终极保底): 直接从 HTML5 <video> 元素的 textTracks 中提取 cues
-   * @returns {Array}
-   */
-  extractFromHTML5VideoTracks() {
-    const video = document.querySelector('video');
-    if (!video || !video.textTracks || video.textTracks.length === 0) return [];
-
-    console.log(`[YDQ] 正在检查 HTML5 video.textTracks (发现 ${video.textTracks.length} 个原生轨道)...`);
-
-    for (let i = 0; i < video.textTracks.length; i++) {
-      const track = video.textTracks[i];
-      if (track.cues && track.cues.length > 0) {
-        console.log(`[YDQ] ✓ 在 textTracks[${i}] (${track.language || track.label}) 发现 ${track.cues.length} 条原生 cues！`);
-        const subtitles = [];
-        for (let j = 0; j < track.cues.length; j++) {
-          const cue = track.cues[j];
-          const text = cue.text ? cue.text.trim() : '';
-          if (text) {
-            subtitles.push({
-              text: this._decodeHtmlEntities(text.replace(/<[^>]*>/g, '')),
-              startMs: Math.round(cue.startTime * 1000),
-              endMs: Math.round(cue.endTime * 1000),
-              index: j,
-              zhText: '',
-            });
-          }
-        }
-        if (subtitles.length > 0) {
-          return subtitles;
-        }
-      }
-    }
-
-    return [];
   },
 
   /**
@@ -149,21 +206,19 @@ const SubtitleFetcher = {
 
     // 1. 同步直读
     let tracks = this._readTracksFromDOMStore();
-    if (tracks && tracks.length > 0) {
-      return this._sortTracks(tracks);
-    }
+    if (tracks && tracks.length > 0) return this._sortTracks(tracks);
 
-    // 2. CustomEvent 轮询请求 (最多 6 次，每次 500ms)
+    // 2. 页面 script 括号匹配提取
+    tracks = this._extractTracksFromPageScripts();
+    if (tracks && tracks.length > 0) return this._sortTracks(tracks);
+
+    // 3. CustomEvent 轮询请求 (最多 6 次，每次 500ms)
     for (let attempt = 1; attempt <= 6; attempt++) {
       tracks = this._readTracksFromDOMStore();
-      if (tracks && tracks.length > 0) {
-        return this._sortTracks(tracks);
-      }
+      if (tracks && tracks.length > 0) return this._sortTracks(tracks);
 
       tracks = await this._requestTracksViaCustomEvent(videoId);
-      if (tracks && tracks.length > 0) {
-        return this._sortTracks(tracks);
-      }
+      if (tracks && tracks.length > 0) return this._sortTracks(tracks);
 
       if (attempt < 6) {
         await new Promise((r) => setTimeout(r, 500));
@@ -203,6 +258,12 @@ const SubtitleFetcher = {
       throw new Error('未检测到视频 ID，请确认位于 YouTube 视频播放页');
     }
 
+    // 优先检查：拦截器是否已捕获到字幕
+    const captured = this._getCapturedSubtitle();
+    if (captured && captured.length > 0) {
+      return captured;
+    }
+
     // 阶段 1: 尝试从 captionTracks 下载
     const tracks = await this.getAvailableTracks();
     if (tracks && tracks.length > 0) {
@@ -217,7 +278,7 @@ const SubtitleFetcher = {
           if (rawText && rawText.trim()) {
             const subs = this._parseRawSubtitle(rawText);
             if (subs && subs.length > 0) {
-              console.log(`[YDQ] ✓ 成功解析出 ${subs.length} 条字幕 (来自轨道: ${track.languageCode})`);
+              console.log(`[YDQ] ✓ 成功解析出 ${subs.length} 条有效字幕 (来自轨道: ${track.languageCode})`);
               return subs;
             }
           }
@@ -227,18 +288,17 @@ const SubtitleFetcher = {
       }
     }
 
-    // 阶段 2 (终极保底): 尝试从 HTML5 视频播放器的 textTracks cues 直接提取
-    const cuesSubs = this.extractFromHTML5VideoTracks();
-    if (cuesSubs && cuesSubs.length > 0) {
-      console.log(`[YDQ] ✓ 成功从 HTML5 video.textTracks 提取到 ${cuesSubs.length} 条实时字幕！`);
-      return cuesSubs;
+    // 再次检查拦截器
+    const capturedAgain = this._getCapturedSubtitle();
+    if (capturedAgain && capturedAgain.length > 0) {
+      return capturedAgain;
     }
 
     throw new Error('未能提取到当前视频的字幕，请确保 YouTube 视频有可用的 CC 字幕');
   },
 
   /**
-   * 全能解析器：XML (<text> 或 <p>) / JSON3 / WebVTT
+   * 全能解析器：XML (<p> 或 <text>) / JSON3 / WebVTT
    * @param {string} rawText
    * @returns {Array}
    */

@@ -1,6 +1,8 @@
 /**
- * YouTubeDubbingQ - Main World 桥接脚本 (DOM 同步直读 + CustomEvent 通信)
- * 运行在 YouTube 网页宿主环境 (MAIN world) 中
+ * YouTubeDubbingQ - Main World 终极拦截与桥接脚本 (v5)
+ * 1. 全局 Fetch / XHR 劫持：自动捕获播放器发出的所有 /api/timedtext 原始字幕响应
+ * 2. 括号匹配算法 (Bracket Matcher)：100% 精确提取页面内嵌的深度嵌套 captionTracks
+ * 3. 多通道 DOM 同步与 CustomEvent 调度
  */
 
 (function () {
@@ -9,11 +11,115 @@
   if (window.__YDQ_BRIDGE_INITIALIZED__) return;
   window.__YDQ_BRIDGE_INITIALIZED__ = true;
 
-  console.log('[YDQ Bridge] Main World 宿主脚本已初始化');
+  console.log('[YDQ Bridge] Main World 终极桥接与拦截引擎已启动');
 
-  /**
-   * 将数据同步写入 DOM 隐藏节点，供 Content Script 0ms 无损直读
-   */
+  // ============= 1. 网络请求拦截器 (自动截获 timedtext) =============
+
+  function cacheSubtitleText(url, text) {
+    if (!text || !text.trim()) return;
+
+    let store = document.getElementById('ydq-captured-subtitle-store');
+    if (!store) {
+      store = document.createElement('script');
+      store.id = 'ydq-captured-subtitle-store';
+      store.type = 'text/plain';
+      store.style.display = 'none';
+      (document.head || document.documentElement).appendChild(store);
+    }
+
+    store.textContent = text;
+    store.setAttribute('data-url', url);
+    store.setAttribute('data-time', Date.now().toString());
+    console.log('[YDQ Bridge] ✓ 成功拦截并缓存播放器 timedtext 字幕响应！');
+  }
+
+  // 拦截 window.fetch
+  const originalFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const response = await originalFetch.apply(this, args);
+    try {
+      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
+      if (url && url.includes('/api/timedtext')) {
+        const clone = response.clone();
+        clone.text().then((text) => cacheSubtitleText(url, text)).catch(() => {});
+      }
+    } catch (e) {}
+    return response;
+  };
+
+  // 拦截 XMLHttpRequest
+  const originalXHROpen = XMLHttpRequest.prototype.open;
+  const originalXHRSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this._ydqUrl = url;
+    return originalXHROpen.apply(this, [method, url, ...rest]);
+  };
+
+  XMLHttpRequest.prototype.send = function (...args) {
+    this.addEventListener('load', function () {
+      try {
+        if (this._ydqUrl && this._ydqUrl.includes('/api/timedtext')) {
+          cacheSubtitleText(this._ydqUrl, this.responseText);
+        }
+      } catch (e) {}
+    });
+    return originalXHRSend.apply(this, args);
+  };
+
+  // ============= 2. 括号匹配算法 (Bracket Matcher) =============
+
+  function extractJsonArray(text, key) {
+    if (!text) return null;
+    const keyIdx = text.indexOf(key);
+    if (keyIdx === -1) return null;
+
+    const startIdx = text.indexOf('[', keyIdx + key.length);
+    if (startIdx === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = startIdx; i < text.length; i++) {
+      const char = text[i];
+
+      if (escape) {
+        escape = false;
+        continue;
+      }
+
+      if (char === '\\') {
+        escape = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === '[') depth++;
+        else if (char === ']') {
+          depth--;
+          if (depth === 0) {
+            const jsonStr = text.substring(startIdx, i + 1);
+            try {
+              return JSON.parse(jsonStr);
+            } catch (e) {
+              return null;
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  // ============= 3. 提取字幕轨 =============
+
   function syncTracksToDOM(tracks) {
     if (!tracks || !Array.isArray(tracks) || tracks.length === 0) return;
 
@@ -29,9 +135,6 @@
     container.textContent = JSON.stringify(tracks);
   }
 
-  /**
-   * 从播放器对象或页面全局变量中全面提取字幕轨道
-   */
   function extractCaptionTracks() {
     let tracks = null;
     const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
@@ -68,19 +171,7 @@
       } catch (e) {}
     }
 
-    // 通道 3: ytd-watch-flexy 组件
-    try {
-      const watchFlexy = document.querySelector('ytd-watch-flexy');
-      if (watchFlexy?.playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
-        const list = watchFlexy.playerData.captions.playerCaptionsTracklistRenderer.captionTracks;
-        if (Array.isArray(list) && list.length > 0) {
-          syncTracksToDOM(list);
-          return list;
-        }
-      }
-    } catch (e) {}
-
-    // 通道 4: window.ytInitialPlayerResponse
+    // 通道 3: window.ytInitialPlayerResponse
     if (window.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
       const list = window.ytInitialPlayerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
       if (Array.isArray(list) && list.length > 0) {
@@ -89,27 +180,27 @@
       }
     }
 
-    // 通道 5: window.ytplayer
-    if (window.ytplayer?.config?.args?.raw_player_response) {
-      try {
-        const raw = JSON.parse(window.ytplayer.config.args.raw_player_response);
-        const list = raw?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-        if (Array.isArray(list) && list.length > 0) {
-          syncTracksToDOM(list);
-          return list;
+    // 通道 4: 扫描页面所有脚本，使用括号匹配算法提取
+    try {
+      const scripts = document.querySelectorAll('script');
+      for (const s of scripts) {
+        const text = s.textContent;
+        if (text && text.includes('captionTracks')) {
+          const extracted = extractJsonArray(text, '"captionTracks"');
+          if (Array.isArray(extracted) && extracted.length > 0) {
+            syncTracksToDOM(extracted);
+            return extracted;
+          }
         }
-      } catch (e) {}
-    }
+      }
+    } catch (e) {}
 
     return null;
   }
 
-  /**
-   * 通道 6: 调用 YouTube Innertube 官方 API (/youtubei/v1/player)
-   */
+  // 通道 5: Innertube API 官方通道
   async function fetchTracksViaInnertube(videoId) {
     if (!videoId) return null;
-
     try {
       const apiKey = window.ytcfg?.get?.('INNERTUBE_API_KEY');
       const context = window.ytcfg?.get?.('INNERTUBE_CONTEXT') || {
@@ -139,19 +230,17 @@
         syncTracksToDOM(list);
         return list;
       }
-    } catch (e) {
-      console.warn('[YDQ Bridge] Innertube 请求失败:', e);
-    }
+    } catch (e) {}
 
     return null;
   }
 
-  // 周期性探测并自动同步到 DOM
+  // 周期性探测
   setInterval(() => {
     extractCaptionTracks();
   }, 1000);
 
-  // 监听来自 Content Script 的 CustomEvent
+  // CustomEvent 通信
   document.addEventListener('YDQ_EVENT_REQUEST_TRACKS', async (e) => {
     const videoId = e.detail?.videoId;
     let tracks = extractCaptionTracks();
@@ -168,7 +257,7 @@
     );
   });
 
-  // 代理拉取字幕内容
+  // 代理拉取字幕
   document.addEventListener('YDQ_EVENT_FETCH_SUBTITLE', async (e) => {
     const { requestId, url } = e.detail || {};
     if (!requestId || !url) return;
