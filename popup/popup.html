@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTubeDubbingQ 设置</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- 头部 -->
+    <header class="popup-header">
+      <div class="popup-brand">
+        <div class="popup-logo">
+          <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
+            <path d="M8 5v14l11-7z" fill="#FFDD00"/>
+          </svg>
+        </div>
+        <div class="popup-title">
+          <h1>YouTubeDubbingQ</h1>
+          <span class="popup-version">v1.0.0</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- 标签栏 -->
+    <nav class="popup-tabs">
+      <button class="popup-tab active" data-tab="api">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        API 设置
+      </button>
+      <button class="popup-tab" data-tab="subtitle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 12h4M13 12h4M7 16h10"/>
+        </svg>
+        字幕设置
+      </button>
+      <button class="popup-tab" data-tab="dubbing">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        </svg>
+        配音设置
+      </button>
+      <button class="popup-tab" data-tab="about">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+        </svg>
+        关于
+      </button>
+    </nav>
+
+    <!-- Tab 内容 -->
+    <div class="popup-content">
+
+      <!-- API 设置 Tab -->
+      <div class="popup-panel active" id="panel-api">
+        <div class="setting-group">
+          <h3 class="setting-group-title">OpenAI 兼容 API</h3>
+
+          <div class="setting-item">
+            <label for="api-base-url">服务器地址</label>
+            <input type="url" id="api-base-url" placeholder="https://api.openai.com" />
+            <span class="setting-hint">兼容 OpenAI 接口的服务器地址</span>
+          </div>
+
+          <div class="setting-item">
+            <label for="api-key">API Key</label>
+            <div class="input-with-toggle">
+              <input type="password" id="api-key" placeholder="sk-..." />
+              <button class="toggle-visibility" id="toggle-api-key" title="显示/隐藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <label for="api-model">模型名称</label>
+            <input type="text" id="api-model" placeholder="gpt-4o-mini" />
+          </div>
+
+          <button class="btn btn-primary" id="btn-test-api">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+            测试连接
+          </button>
+          <div class="test-result" id="api-test-result"></div>
+        </div>
+      </div>
+
+      <!-- 字幕设置 Tab -->
+      <div class="popup-panel" id="panel-subtitle">
+        <div class="setting-group">
+          <h3 class="setting-group-title">显示模式</h3>
+          <div class="setting-item">
+            <div class="radio-group">
+              <label class="radio-label">
+                <input type="radio" name="subtitle-mode" value="bilingual" checked />
+                <span>双语显示</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="subtitle-mode" value="zh-only" />
+                <span>仅中文</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="subtitle-mode" value="en-only" />
+                <span>仅英文</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <h3 class="setting-group-title">中文字幕 (主字幕)</h3>
+
+          <div class="setting-item">
+            <label for="zh-font-family">字体</label>
+            <select id="zh-font-family">
+              <option value='"Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif'>微软雅黑</option>
+              <option value='"SimHei", "Heiti SC", sans-serif'>黑体</option>
+              <option value='"SimSun", "Songti SC", serif'>宋体</option>
+              <option value='"KaiTi", "STKaiti", serif'>楷体</option>
+              <option value='"FangSong", "STFangsong", serif'>仿宋</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <label for="zh-font-size">字号 <span class="value-display" id="zh-font-size-val">22px</span></label>
+            <input type="range" id="zh-font-size" min="14" max="36" value="22" />
+          </div>
+
+          <div class="setting-item">
+            <label for="zh-color">颜色</label>
+            <div class="color-picker-wrapper">
+              <input type="color" id="zh-color" value="#FFDD00" />
+              <span class="color-value" id="zh-color-val">#FFDD00</span>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <label for="zh-font-weight">粗细</label>
+            <select id="zh-font-weight">
+              <option value="normal">正常</option>
+              <option value="bold" selected>加粗</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <h3 class="setting-group-title">英文字幕 (副字幕)</h3>
+
+          <div class="setting-item">
+            <label for="en-font-family">字体</label>
+            <select id="en-font-family">
+              <option value='"Segoe UI", "Roboto", "Arial", sans-serif'>Segoe UI</option>
+              <option value='"Roboto", "Arial", sans-serif'>Roboto</option>
+              <option value='"Arial", sans-serif'>Arial</option>
+              <option value='"Times New Roman", serif'>Times New Roman</option>
+              <option value='"Georgia", serif'>Georgia</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <label for="en-font-size">字号 <span class="value-display" id="en-font-size-val">16px</span></label>
+            <input type="range" id="en-font-size" min="12" max="28" value="16" />
+          </div>
+
+          <div class="setting-item">
+            <label for="en-color">颜色</label>
+            <div class="color-picker-wrapper">
+              <input type="color" id="en-color" value="#FFFFFF" />
+              <span class="color-value" id="en-color-val">#FFFFFF</span>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <label for="en-font-weight">粗细</label>
+            <select id="en-font-weight">
+              <option value="normal" selected>正常</option>
+              <option value="bold">加粗</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <h3 class="setting-group-title">通用设置</h3>
+
+          <div class="setting-item">
+            <label for="subtitle-bg">背景样式</label>
+            <select id="subtitle-bg">
+              <option value="transparent">透明</option>
+              <option value="semi-transparent" selected>半透明黑底</option>
+              <option value="solid">纯黑底</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <label class="switch-label">
+              <span>描边效果</span>
+              <input type="checkbox" id="subtitle-stroke" checked />
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+
+          <div class="setting-item">
+            <label for="subtitle-position">底部位置 <span class="value-display" id="subtitle-position-val">10%</span></label>
+            <input type="range" id="subtitle-position" min="2" max="30" value="10" />
+          </div>
+        </div>
+      </div>
+
+      <!-- 配音设置 Tab -->
+      <div class="popup-panel" id="panel-dubbing">
+        <div class="setting-group">
+          <h3 class="setting-group-title">TTS 引擎</h3>
+          <div class="setting-item">
+            <div class="radio-group">
+              <label class="radio-label">
+                <input type="radio" name="tts-engine" value="edge" checked />
+                <span>Edge TTS <small>(免费)</small></span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="tts-engine" value="doubao" />
+                <span>豆包 TTS</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Edge TTS 设置 -->
+        <div class="setting-group" id="edge-settings">
+          <h3 class="setting-group-title">Edge TTS 语音选择</h3>
+          <div class="setting-item">
+            <label for="edge-voice">中文语音</label>
+            <select id="edge-voice">
+              <option value="zh-CN-XiaoxiaoNeural">晓晓 (女声·温暖亲切)</option>
+              <option value="zh-CN-YunxiNeural">云希 (男声·阳光活力)</option>
+              <option value="zh-CN-YunjianNeural">云健 (男声·沉稳大气)</option>
+              <option value="zh-CN-XiaoyiNeural">晓伊 (女声·活泼可爱)</option>
+              <option value="zh-CN-YunyangNeural">云扬 (男声·专业播报)</option>
+              <option value="zh-CN-XiaochenNeural">晓辰 (女声·知性优雅)</option>
+              <option value="zh-CN-XiaohanNeural">晓涵 (女声·温柔甜美)</option>
+              <option value="zh-CN-XiaomengNeural">晓梦 (女声·清新自然)</option>
+              <option value="zh-CN-XiaoruiNeural">晓睿 (女声·成熟稳重)</option>
+              <option value="zh-CN-XiaozhenNeural">晓甄 (女声·端庄大方)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 豆包 TTS 设置 -->
+        <div class="setting-group" id="doubao-settings" style="display:none;">
+          <h3 class="setting-group-title">豆包 TTS 配置</h3>
+
+          <div class="setting-item">
+            <label for="doubao-api-url">API 地址</label>
+            <input type="url" id="doubao-api-url" placeholder="https://api.doubao.com" />
+          </div>
+
+          <div class="setting-item">
+            <label for="doubao-api-key">API Key</label>
+            <input type="password" id="doubao-api-key" placeholder="API Key" />
+          </div>
+
+          <div class="setting-item">
+            <label for="doubao-model">模型名称</label>
+            <input type="text" id="doubao-model" placeholder="tts-1" />
+          </div>
+
+          <div class="setting-item">
+            <label for="doubao-voice">语音 ID</label>
+            <input type="text" id="doubao-voice" placeholder="alloy" />
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <h3 class="setting-group-title">音量设置</h3>
+
+          <div class="setting-item">
+            <label for="original-volume">原视频音量 <span class="value-display" id="original-volume-val">20%</span></label>
+            <input type="range" id="original-volume" min="0" max="100" value="20" />
+            <span class="setting-hint">配音时原视频的音量比例</span>
+          </div>
+
+          <div class="setting-item">
+            <label for="dubbing-volume">配音音量 <span class="value-display" id="dubbing-volume-val">100%</span></label>
+            <input type="range" id="dubbing-volume" min="0" max="100" value="100" />
+          </div>
+        </div>
+      </div>
+
+      <!-- 关于 Tab -->
+      <div class="popup-panel" id="panel-about">
+        <div class="about-content">
+          <div class="about-logo">
+            <svg viewBox="0 0 24 24" fill="none" width="48" height="48">
+              <path d="M8 5v14l11-7z" fill="#FFDD00"/>
+            </svg>
+          </div>
+          <h2>YouTubeDubbingQ</h2>
+          <p class="about-desc">YouTube 视频 AI 双语字幕翻译 + 实时中文配音</p>
+          <p class="about-version">版本 1.0.0</p>
+
+          <div class="about-links">
+            <a href="https://github.com/qxk2005/YouTubeDubbingQ" target="_blank" class="about-link">
+              <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+              </svg>
+              GitHub 仓库
+            </a>
+          </div>
+
+          <div class="about-features">
+            <h3>功能特点</h3>
+            <ul>
+              <li>🔤 AI 驱动的双语字幕翻译</li>
+              <li>🎙️ Edge TTS / 豆包 TTS 实时配音</li>
+              <li>🎨 Netflix 风格字幕，全面可定制</li>
+              <li>🔊 智能音量控制，保留背景音乐</li>
+              <li>⚡ 音画同步优化（翻译约束 + 动态调速）</li>
+              <li>🤖 支持任何 OpenAI 兼容 AI 服务</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 底部保存按钮 -->
+    <footer class="popup-footer">
+      <button class="btn btn-secondary" id="btn-reset">恢复默认</button>
+      <button class="btn btn-primary" id="btn-save">保存设置</button>
+    </footer>
+  </div>
+
+  <script src="../lib/storage.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

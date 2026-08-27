@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+.python-version
+
+# Build
+dist/
+build/
+*.crx
+*.pem

@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "YouTubeDubbingQ",
+  "version": "1.0.0",
+  "description": "YouTube 视频 AI 双语字幕翻译 + 实时中文配音",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "*://*.googleapis.com/*",
+    "https://speech.platform.bing.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "js": [
+        "lib/storage.js",
+        "content/subtitle-fetcher.js",
+        "content/translator.js",
+        "content/subtitle-overlay.js",
+        "content/tts-manager.js",
+        "content/audio-player.js",
+        "content/toolbar.js",
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["offscreen/offscreen.html"],
+      "matches": ["*://*.youtube.com/*"]
+    }
+  ]
+}

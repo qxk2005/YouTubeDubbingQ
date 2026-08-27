@@ -1,0 +1,333 @@
+/*
+ * YouTubeDubbingQ - Content Script 样式
+ * 字幕覆盖层、工具栏和提示的样式定义
+ */
+
+/* ============================================
+   字幕覆盖层
+   ============================================ */
+
+#ydq-subtitle-container {
+  position: absolute;
+  bottom: 10%;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  pointer-events: none;
+  z-index: 60;
+  padding: 0 5%;
+}
+
+#ydq-subtitle-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  max-width: 90%;
+  transition: opacity 0.25s ease-in-out, transform 0.25s ease-in-out;
+}
+
+#ydq-subtitle-wrapper.ydq-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#ydq-subtitle-wrapper.ydq-hidden {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.ydq-subtitle-line {
+  text-align: center;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.ydq-subtitle-line.ydq-zh {
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+  font-size: 22px;
+  color: #FFDD00;
+  font-weight: bold;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 6px rgba(0, 0, 0, 0.6), 1px 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.ydq-subtitle-line.ydq-en {
+  font-family: "Segoe UI", "Roboto", "Arial", sans-serif;
+  font-size: 16px;
+  color: #FFFFFF;
+  font-weight: normal;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 6px rgba(0, 0, 0, 0.6), 1px 1px 2px rgba(0, 0, 0, 0.8);
+  opacity: 0.9;
+}
+
+/* ============================================
+   浮动工具栏
+   ============================================ */
+
+#ydq-toolbar {
+  position: absolute;
+  right: 12px;
+  bottom: 60px;
+  z-index: 70;
+  opacity: 0;
+  transform: translateX(8px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  pointer-events: none;
+}
+
+#ydq-toolbar.ydq-toolbar-visible {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.ydq-toolbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: rgba(15, 15, 20, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.ydq-toolbar-brand {
+  padding: 0 4px;
+}
+
+.ydq-toolbar-logo {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: #FFDD00;
+  text-shadow: 0 0 8px rgba(255, 221, 0, 0.4);
+}
+
+.ydq-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.15);
+  margin: 0 4px;
+}
+
+.ydq-toolbar-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.ydq-toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #FFFFFF;
+}
+
+.ydq-toolbar-btn.ydq-active {
+  background: rgba(255, 221, 0, 0.15);
+  color: #FFDD00;
+}
+
+.ydq-toolbar-btn.ydq-active:hover {
+  background: rgba(255, 221, 0, 0.25);
+}
+
+.ydq-toolbar-btn-sm {
+  padding: 5px 6px;
+}
+
+.ydq-toolbar-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.ydq-toolbar-label {
+  font-size: 12px;
+}
+
+/* ============================================
+   音量控制面板
+   ============================================ */
+
+.ydq-toolbar-volume-group {
+  position: relative;
+}
+
+.ydq-volume-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  min-width: 200px;
+  padding: 12px 14px;
+  background: rgba(15, 15, 20, 0.95);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px);
+  transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s ease;
+}
+
+.ydq-volume-panel.ydq-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.ydq-volume-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ydq-volume-item:last-child {
+  margin-bottom: 0;
+}
+
+.ydq-volume-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+  min-width: 40px;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+.ydq-volume-slider {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.ydq-volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #FFDD00;
+  cursor: pointer;
+  box-shadow: 0 0 4px rgba(255, 221, 0, 0.5);
+}
+
+.ydq-volume-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #FFDD00;
+  cursor: pointer;
+  border: none;
+}
+
+.ydq-volume-value {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  min-width: 32px;
+  text-align: right;
+  font-family: monospace;
+}
+
+/* ============================================
+   翻译进度条
+   ============================================ */
+
+.ydq-toolbar-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 4px;
+}
+
+.ydq-progress-bar {
+  width: 60px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.ydq-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #FFDD00, #FF9500);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.ydq-progress-text {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+/* ============================================
+   Toast 提示
+   ============================================ */
+
+.ydq-toast {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-20px);
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  color: #FFFFFF;
+  z-index: 80;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.ydq-toast.ydq-toast-show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.ydq-toast-info {
+  background: rgba(30, 30, 40, 0.9);
+  border: 1px solid rgba(100, 100, 255, 0.3);
+}
+
+.ydq-toast-success {
+  background: rgba(20, 40, 20, 0.9);
+  border: 1px solid rgba(100, 255, 100, 0.3);
+}
+
+.ydq-toast-error {
+  background: rgba(40, 20, 20, 0.9);
+  border: 1px solid rgba(255, 100, 100, 0.3);
+}
