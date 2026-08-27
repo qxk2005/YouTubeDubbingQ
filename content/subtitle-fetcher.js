@@ -1,10 +1,14 @@
 /**
- * YouTubeDubbingQ - YouTube 字幕获取模块 (v6 - 纯 DOM 读取)
+ * YouTubeDubbingQ - YouTube 字幕获取模块 (v7 - Content Script 完全自主)
  * 
- * 三级数据获取策略 (全部通过 DOM textContent 读取，100% 跨世界可靠)：
- * 1. 读取 Main World 网络拦截器已捕获的字幕原文 (#ydq-intercepted-subtitle)
- * 2. 读取 Main World 周期同步的字幕轨道列表 (#ydq-caption-tracks)，然后通过 DOM 请求下载
- * 3. 页面 script 标签括号匹配算法提取
+ * 核心策略变更：完全放弃跨世界通信，Content Script 自主完成所有工作。
+ * 
+ * 三级获取策略：
+ * 1. 从页面 HTML <script> 标签中提取 captionTracks (括号匹配算法)
+ * 2. 从 DOM 中读取 Main World 桥接脚本同步的字幕轨道数据
+ * 3. 自主调用 YouTube Innertube API (/youtubei/v1/player) 获取字幕轨道
+ * 
+ * 字幕下载：直接由 Content Script fetch (host_permissions 保证 Cookie 携带)
  */
 
 const SubtitleFetcher = {
@@ -42,36 +46,40 @@ const SubtitleFetcher = {
     return null;
   },
 
-  // ============= 通道 0: 读取网络拦截器已捕获的字幕 =============
+  // ============= 从页面 HTML 提取 Innertube 配置 =============
 
-  _getInterceptedSubtitle() {
+  _getInnertubeConfig() {
     try {
-      const store = document.getElementById('ydq-intercepted-subtitle');
-      if (store && store.textContent && store.textContent.trim()) {
-        const parsed = this._parseRawSubtitle(store.textContent);
-        if (parsed && parsed.length > 0) {
-          console.log('[YDQ] ✓ 从网络拦截器直接获取到 ' + parsed.length + ' 条字幕');
-          return parsed;
+      const scripts = document.querySelectorAll('script');
+      let apiKey = null;
+      let clientVersion = null;
+      let clientName = 'WEB';
+
+      for (const s of scripts) {
+        const text = s.textContent;
+        if (!text) continue;
+
+        if (!apiKey) {
+          const keyMatch = text.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
+          if (keyMatch) apiKey = keyMatch[1];
         }
+
+        if (!clientVersion) {
+          const verMatch = text.match(/"clientVersion"\s*:\s*"([^"]+)"/);
+          if (verMatch) clientVersion = verMatch[1];
+        }
+
+        if (apiKey && clientVersion) break;
+      }
+
+      if (apiKey) {
+        return { apiKey, clientName, clientVersion: clientVersion || '2.20240101.00.00' };
       }
     } catch (e) {}
     return null;
   },
 
-  // ============= 通道 1: DOM 直读字幕轨道列表 =============
-
-  _readTracksFromDOM() {
-    try {
-      const store = document.getElementById('ydq-caption-tracks');
-      if (store && store.textContent && store.textContent.trim()) {
-        const list = JSON.parse(store.textContent);
-        if (Array.isArray(list) && list.length > 0) return list;
-      }
-    } catch (e) {}
-    return [];
-  },
-
-  // ============= 通道 2: 页面 script 括号匹配 =============
+  // ============= 通道 1: 从页面 <script> 标签提取 captionTracks =============
 
   _extractTracksFromPageScripts() {
     try {
@@ -80,81 +88,115 @@ const SubtitleFetcher = {
         const text = s.textContent;
         if (text && text.includes('captionTracks')) {
           const list = this._extractJsonArray(text, '"captionTracks"');
-          if (Array.isArray(list) && list.length > 0) return list;
+          if (Array.isArray(list) && list.length > 0) {
+            console.log('[YDQ] ✓ 从页面 script 标签提取到 ' + list.length + ' 条字幕轨');
+            return list;
+          }
         }
       }
     } catch (e) {}
     return [];
   },
 
-  // ============= 通过 DOM 节点代理 fetch 字幕内容 =============
+  // ============= 通道 2: 从 DOM 直读 Main World 桥接数据 =============
 
-  async _fetchViaDOMProxy(url) {
-    return new Promise((resolve, reject) => {
-      const reqId = 'r' + Date.now() + Math.random().toString(36).substr(2, 6);
+  _readTracksFromBridgeDOM() {
+    try {
+      const store = document.getElementById('ydq-caption-tracks');
+      if (store && store.textContent && store.textContent.trim()) {
+        const list = JSON.parse(store.textContent);
+        if (Array.isArray(list) && list.length > 0) {
+          console.log('[YDQ] ✓ 从 DOM 桥接节点读取到 ' + list.length + ' 条字幕轨');
+          return list;
+        }
+      }
+    } catch (e) {}
+    return [];
+  },
 
-      // 创建或获取请求节点
-      let reqNode = document.getElementById('ydq-fetch-request');
-      if (!reqNode) {
-        reqNode = document.createElement('div');
-        reqNode.id = 'ydq-fetch-request';
-        reqNode.style.display = 'none';
-        document.body.appendChild(reqNode);
+  // ============= 通道 3: 直接调用 YouTube Innertube API =============
+
+  async _fetchTracksViaInnertubeAPI(videoId) {
+    const config = this._getInnertubeConfig();
+    if (!config) {
+      console.warn('[YDQ] 未能从页面提取 Innertube 配置');
+      return [];
+    }
+
+    console.log('[YDQ] 正在通过 Innertube API 获取字幕轨道...');
+
+    try {
+      const url = 'https://www.youtube.com/youtubei/v1/player?key=' + config.apiKey + '&prettyPrint=false';
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          videoId: videoId,
+          context: {
+            client: {
+              clientName: config.clientName,
+              clientVersion: config.clientVersion,
+              hl: 'en',
+              gl: 'US',
+            },
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        console.warn('[YDQ] Innertube API 返回 HTTP ' + response.status);
+        return [];
       }
 
-      // 设置响应监听
-      let resolved = false;
-      const checkResponse = () => {
-        const respNode = document.getElementById('ydq-fetch-response');
-        if (respNode && respNode.getAttribute('data-req-id') === reqId) {
-          if (!resolved) {
-            resolved = true;
-            const success = respNode.getAttribute('data-success') === 'true';
-            if (success) {
-              resolve(respNode.textContent || '');
-            } else {
-              reject(new Error(respNode.getAttribute('data-error') || '代理请求失败'));
-            }
-          }
+      const data = await response.json();
+
+      // 检查是否可播放
+      if (data.playabilityStatus && data.playabilityStatus.status !== 'OK') {
+        console.warn('[YDQ] Innertube 播放状态:', data.playabilityStatus.status);
+      }
+
+      const tracks = data.captions &&
+                      data.captions.playerCaptionsTracklistRenderer &&
+                      data.captions.playerCaptionsTracklistRenderer.captionTracks;
+
+      if (Array.isArray(tracks) && tracks.length > 0) {
+        console.log('[YDQ] ✓ Innertube API 返回 ' + tracks.length + ' 条字幕轨');
+        return tracks;
+      }
+
+      console.warn('[YDQ] Innertube API 返回中无 captionTracks');
+      return [];
+    } catch (e) {
+      console.error('[YDQ] Innertube API 调用异常:', e);
+      return [];
+    }
+  },
+
+  // ============= 检查拦截器缓存 =============
+
+  _getInterceptedSubtitle() {
+    try {
+      const store = document.getElementById('ydq-intercepted-subtitle');
+      if (store && store.textContent && store.textContent.trim()) {
+        const parsed = this._parseRawSubtitle(store.textContent);
+        if (parsed && parsed.length > 0) {
+          console.log('[YDQ] ✓ 从网络拦截器获取到 ' + parsed.length + ' 条字幕');
+          return parsed;
         }
-      };
-
-      // 轮询检查响应（每 100ms）
-      const intervalId = setInterval(checkResponse, 100);
-
-      // 超时
-      setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          clearInterval(intervalId);
-          reject(new Error('代理请求字幕超时'));
-        }
-      }, 10000);
-
-      // 发送请求（写入 DOM 属性触发 Main World 的 MutationObserver）
-      reqNode.setAttribute('data-url', url);
-      reqNode.setAttribute('data-req-id', reqId);
-
-      // 也额外用轮询保证响应不被遗漏
-      setTimeout(checkResponse, 200);
-      setTimeout(checkResponse, 500);
-      setTimeout(checkResponse, 1000);
-      setTimeout(checkResponse, 2000);
-      setTimeout(checkResponse, 3000);
-
-      // 清理
-      setTimeout(() => {
-        clearInterval(intervalId);
-      }, 11000);
-    });
+      }
+    } catch (e) {}
+    return null;
   },
 
   // ============= 优先级排序 =============
 
   _sortTracks(tracks) {
     return [...tracks].sort((a, b) => {
-      const isEnA = (a.languageCode || '').startsWith('en');
-      const isEnB = (b.languageCode || '').startsWith('en');
+      const langA = a.languageCode || '';
+      const langB = b.languageCode || '';
+      const isEnA = langA === 'en' || langA.startsWith('en');
+      const isEnB = langB === 'en' || langB.startsWith('en');
       const isAsrA = a.kind === 'asr';
       const isAsrB = b.kind === 'asr';
       if (isEnA && !isEnB) return -1;
@@ -171,54 +213,81 @@ const SubtitleFetcher = {
     const videoId = this.getVideoId();
     if (!videoId) throw new Error('未检测到视频 ID');
 
-    console.log('[YDQ] 开始获取字幕 (videoId: ' + videoId + ')');
+    console.log('[YDQ] ===== 开始字幕获取流程 (videoId: ' + videoId + ') =====');
 
-    // 策略: 轮询多通道，最多等 8 秒
-    const maxAttempts = 16;
-    const interval = 500;
+    // 多轮尝试，每轮尝试所有通道
+    const maxRounds = 10;
+    const roundInterval = 1000;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      console.log('[YDQ] 字幕探测第 ' + attempt + '/' + maxAttempts + ' 次...');
+    for (let round = 1; round <= maxRounds; round++) {
+      console.log('[YDQ] --- 第 ' + round + '/' + maxRounds + ' 轮探测 ---');
 
-      // 优先级 0: 检查拦截器
+      // 检查拦截器缓存
       const intercepted = this._getInterceptedSubtitle();
       if (intercepted) return intercepted;
 
-      // 优先级 1: DOM 直读字幕轨道
-      let tracks = this._readTracksFromDOM();
+      // 汇总所有通道获取到的轨道
+      let tracks = [];
 
-      // 优先级 2: 页面 script 括号匹配
-      if (!tracks || tracks.length === 0) {
+      // 通道 1: 页面 script 括号匹配
+      if (tracks.length === 0) {
         tracks = this._extractTracksFromPageScripts();
       }
 
-      if (tracks && tracks.length > 0) {
+      // 通道 2: DOM 桥接节点
+      if (tracks.length === 0) {
+        tracks = this._readTracksFromBridgeDOM();
+      }
+
+      // 通道 3: Innertube API (从第 2 轮开始)
+      if (tracks.length === 0 && round >= 2) {
+        tracks = await this._fetchTracksViaInnertubeAPI(videoId);
+      }
+
+      // 如果获取到了轨道，尝试下载字幕内容
+      if (tracks.length > 0) {
         const sorted = this._sortTracks(tracks);
         for (const track of sorted) {
-          if (!track.baseUrl) continue;
+          const baseUrl = track.baseUrl;
+          if (!baseUrl) continue;
+
+          const langCode = track.languageCode || 'unknown';
+          const trackName = (track.name && (track.name.simpleText ||
+            (track.name.runs && track.name.runs[0] && track.name.runs[0].text))) || '';
+          console.log('[YDQ] 正在下载字幕: [' + langCode + '] ' + trackName);
+
           try {
-            console.log('[YDQ] 正在通过 DOM 代理下载字幕: [' + track.languageCode + '] ' + (track.name || ''));
-            const rawText = await this._fetchViaDOMProxy(track.baseUrl);
-            if (rawText && rawText.trim()) {
-              const subs = this._parseRawSubtitle(rawText);
-              if (subs && subs.length > 0) {
-                console.log('[YDQ] ✓ 成功解析 ' + subs.length + ' 条字幕 (轨道: ' + track.languageCode + ')');
-                return subs;
-              }
+            // Content Script 直接 fetch，host_permissions 保证 Cookie 携带
+            const response = await fetch(baseUrl, { credentials: 'include' });
+            if (!response.ok) {
+              console.warn('[YDQ] 字幕下载 HTTP ' + response.status);
+              continue;
+            }
+
+            const rawText = await response.text();
+            if (!rawText || !rawText.trim()) {
+              console.warn('[YDQ] 字幕下载内容为空');
+              continue;
+            }
+
+            const subs = this._parseRawSubtitle(rawText);
+            if (subs && subs.length > 0) {
+              console.log('[YDQ] ✓✓✓ 成功解析 ' + subs.length + ' 条字幕！(来自轨道: ' + langCode + ')');
+              return subs;
             }
           } catch (err) {
-            console.warn('[YDQ] 轨道 [' + track.languageCode + '] 下载失败:', err.message);
+            console.warn('[YDQ] 字幕轨 [' + langCode + '] 下载异常:', err.message);
           }
         }
       }
 
       // 等待下一轮
-      if (attempt < maxAttempts) {
-        await new Promise((r) => setTimeout(r, interval));
+      if (round < maxRounds) {
+        await new Promise((r) => setTimeout(r, roundInterval));
       }
     }
 
-    throw new Error('未能提取到当前视频的字幕，请确保 YouTube 视频有可用的 CC 字幕');
+    throw new Error('经过 10 秒探测仍未获取到字幕。请确认: 1) 视频有 CC 字幕 2) YouTube 已登录');
   },
 
   // ============= 全能解析引擎 =============
@@ -226,7 +295,6 @@ const SubtitleFetcher = {
   _parseRawSubtitle(rawText) {
     const trimmed = rawText.trim();
 
-    // JSON3
     if (trimmed.startsWith('{')) {
       try {
         const data = JSON.parse(trimmed);
@@ -235,7 +303,6 @@ const SubtitleFetcher = {
       } catch (e) {}
     }
 
-    // XML
     if (trimmed.startsWith('<')) {
       try {
         const parsed = this._parseXML(trimmed);
@@ -243,7 +310,6 @@ const SubtitleFetcher = {
       } catch (e) {}
     }
 
-    // VTT
     if (trimmed.includes('-->')) {
       try {
         const parsed = this._parseVTT(trimmed);
@@ -279,24 +345,22 @@ const SubtitleFetcher = {
     const subs = [];
     let idx = 0;
 
-    // <text start="..." dur="...">
     const textNodes = doc.getElementsByTagName('text');
     if (textNodes.length > 0) {
       for (let i = 0; i < textNodes.length; i++) {
         const n = textNodes[i];
         const raw = (n.textContent || '').trim();
         if (!raw) continue;
-        const startSec = parseFloat(n.getAttribute('start') || '0');
-        const durSec = parseFloat(n.getAttribute('dur') || '3');
         subs.push({
-          text: this._decode(raw), startMs: Math.round(startSec * 1000),
-          endMs: Math.round((startSec + durSec) * 1000), index: idx++, zhText: '',
+          text: this._decode(raw),
+          startMs: Math.round(parseFloat(n.getAttribute('start') || '0') * 1000),
+          endMs: Math.round((parseFloat(n.getAttribute('start') || '0') + parseFloat(n.getAttribute('dur') || '3')) * 1000),
+          index: idx++, zhText: '',
         });
       }
       if (subs.length > 0) return subs;
     }
 
-    // <p t="..." d="...">
     const pNodes = doc.getElementsByTagName('p');
     for (let i = 0; i < pNodes.length; i++) {
       const n = pNodes[i];
