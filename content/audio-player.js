@@ -122,19 +122,15 @@ const AudioPlayer = {
 
     // 查找当前时间所在的段落
     const segment = SegmentManager.findSegmentAtTime(currentTimeMs);
-    if (!segment) {
-      // 不在任何段落中，不做任何操作
-      return;
-    }
+    if (!segment) return;
 
     // 如果已在播放这个段落，不重复触发
     if (this._playingSegmentIndex === segment.startIndex) return;
 
-    // 检查是否在段落开始的触发窗口内 (startMs ± 300ms)
-    if (currentTimeMs >= segment.startMs - 300 && currentTimeMs < segment.startMs + 800) {
-      this._playingSegmentIndex = segment.startIndex;
-      this._playSegmentAudio(segment);
-    }
+    // 触发条件：进入一个新段落（不管是从头还是中途进入）
+    // 这样即使用户在视频中间开启配音，也能播放当前段落
+    this._playingSegmentIndex = segment.startIndex;
+    this._playSegmentAudio(segment);
   },
 
   /**

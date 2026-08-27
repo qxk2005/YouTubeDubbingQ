@@ -158,10 +158,23 @@
       await TTSManager.enable();
       AudioPlayer.enable();
 
-      // 预生成前 2 个段落的音频
+      // 从当前播放位置开始预加载（而非从头开始）
       if (segments.length > 0) {
+        const video = document.querySelector('video');
+        const currentTimeMs = video ? video.currentTime * 1000 : 0;
+
+        // 找到当前时间所在或之后最近的段落
+        let startSegment = segments[0];
+        for (const seg of segments) {
+          if (seg.endMs >= currentTimeMs) {
+            startSegment = seg;
+            break;
+          }
+        }
+
+        console.log(`[YDQ] 从段落 ${startSegment.startIndex} 开始预加载 (当前时间: ${(currentTimeMs/1000).toFixed(1)}s)`);
         Toolbar.showToast('正在生成配音...', 'info');
-        await TTSManager.prefetchSegments(segments[0].startIndex);
+        await TTSManager.prefetchSegments(startSegment.startIndex);
       }
 
       Toolbar.showToast('配音已启动', 'success');
