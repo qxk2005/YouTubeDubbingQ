@@ -42,6 +42,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       createOffscreen().then(() => sendResponse({ success: true }));
       return true; // 异步响应
 
+    case 'YDQ_FETCH_PLAYER_DATA':
+      // 通过 Service Worker 代理调用 Innertube API 获取视频元数据
+      fetchPlayerData(message.videoId, message.config)
+        .then(sendResponse)
+        .catch((e) => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'YDQ_FETCH_URL':
+      // 通过 Service Worker 代理下载任意 URL 内容
+      fetchUrlContent(message.url)
+        .then(sendResponse)
+        .catch((e) => sendResponse({ success: false, error: e.message }));
+      return true;
+
     case 'YDQ_TTS_REQUEST':
       // 确保 Offscreen Document 存在，然后转发请求
       createOffscreen().then(() => {
@@ -114,6 +128,78 @@ async function testApiConnection(config) {
     }
   } catch (e) {
     return { success: false, message: `连接错误: ${e.message}` };
+  }
+}
+
+/**
+ * 通过 Service Worker 调用 YouTube Innertube API 获取视频播放器数据
+ * @param {string} videoId 视频 ID
+ * @param {Object} config Innertube 配置 {apiKey, clientName, clientVersion}
+ * @returns {Promise<{success: boolean, tracks?: Array, error?: string}>}
+ */
+async function fetchPlayerData(videoId, config) {
+  try {
+    const apiKey = config?.apiKey || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+    const clientName = config?.clientName || 'WEB';
+    const clientVersion = config?.clientVersion || '2.20240101.00.00';
+
+    const url = `https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://www.youtube.com',
+        'Referer': 'https://www.youtube.com/',
+      },
+      body: JSON.stringify({
+        videoId: videoId,
+        context: {
+          client: {
+            clientName: clientName,
+            clientVersion: clientVersion,
+            hl: 'en',
+            gl: 'US',
+          },
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      return { success: false, error: 'Innertube API HTTP ' + response.status };
+    }
+
+    const data = await response.json();
+    const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+    if (Array.isArray(tracks) && tracks.length > 0) {
+      console.log('[YDQ SW] Innertube API 返回 ' + tracks.length + ' 条字幕轨');
+      return { success: true, tracks: tracks };
+    }
+
+    return {
+      success: false,
+      error: 'Innertube 未返回字幕轨道 (playabilityStatus: ' + (data?.playabilityStatus?.status || 'unknown') + ')',
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * 通过 Service Worker 代理下载任意 URL 内容
+ * @param {string} url 要下载的 URL
+ * @returns {Promise<{success: boolean, text?: string, error?: string}>}
+ */
+async function fetchUrlContent(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      return { success: false, error: 'HTTP ' + response.status };
+    }
+    const text = await response.text();
+    return { success: true, text: text };
+  } catch (e) {
+    return { success: false, error: e.message };
   }
 }
 

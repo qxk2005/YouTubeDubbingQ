@@ -188,8 +188,35 @@ const SubtitleFetcher = {
     } catch (e) {}
     return null;
   },
+  // ============= 通道 4: Service Worker 代理 Innertube API =============
+
+  async _fetchTracksViaSW(videoId) {
+    try {
+      const config = this._getInnertubeConfig();
+      console.log('[YDQ] 正在通过 Service Worker 代理调用 Innertube API...');
+
+      const result = await chrome.runtime.sendMessage({
+        type: 'YDQ_FETCH_PLAYER_DATA',
+        videoId: videoId,
+        config: config || {},
+      });
+
+      if (result && result.success && Array.isArray(result.tracks)) {
+        console.log('[YDQ] ✓ SW 代理返回 ' + result.tracks.length + ' 条字幕轨');
+        return result.tracks;
+      }
+
+      if (result && result.error) {
+        console.warn('[YDQ] SW 代理错误:', result.error);
+      }
+    } catch (e) {
+      console.warn('[YDQ] SW 代理通信异常:', e.message);
+    }
+    return [];
+  },
 
   // ============= 优先级排序 =============
+
 
   _sortTracks(tracks) {
     return [...tracks].sort((a, b) => {
@@ -239,9 +266,14 @@ const SubtitleFetcher = {
         tracks = this._readTracksFromBridgeDOM();
       }
 
-      // 通道 3: Innertube API (从第 2 轮开始)
+      // 通道 3: Content Script 直接调用 Innertube API (从第 2 轮开始)
       if (tracks.length === 0 && round >= 2) {
         tracks = await this._fetchTracksViaInnertubeAPI(videoId);
+      }
+
+      // 通道 4: Service Worker 代理调用 Innertube API (从第 4 轮开始)
+      if (tracks.length === 0 && round >= 4) {
+        tracks = await this._fetchTracksViaSW(videoId);
       }
 
       // 如果获取到了轨道，尝试下载字幕内容
@@ -257,14 +289,35 @@ const SubtitleFetcher = {
           console.log('[YDQ] 正在下载字幕: [' + langCode + '] ' + trackName);
 
           try {
-            // Content Script 直接 fetch，host_permissions 保证 Cookie 携带
-            const response = await fetch(baseUrl, { credentials: 'include' });
-            if (!response.ok) {
-              console.warn('[YDQ] 字幕下载 HTTP ' + response.status);
-              continue;
+            // 方式 A: Content Script 直接 fetch
+            let rawText = null;
+            try {
+              const response = await fetch(baseUrl, { credentials: 'include' });
+              if (response.ok) {
+                rawText = await response.text();
+              } else {
+                console.warn('[YDQ] Content Script fetch HTTP ' + response.status + ', 尝试 SW 代理...');
+              }
+            } catch (fetchErr) {
+              console.warn('[YDQ] Content Script fetch 异常:', fetchErr.message, ', 尝试 SW 代理...');
             }
 
-            const rawText = await response.text();
+            // 方式 B: Service Worker 代理下载 (回退)
+            if (!rawText || !rawText.trim()) {
+              try {
+                const swResult = await chrome.runtime.sendMessage({
+                  type: 'YDQ_FETCH_URL',
+                  url: baseUrl,
+                });
+                if (swResult && swResult.success && swResult.text) {
+                  rawText = swResult.text;
+                  console.log('[YDQ] ✓ 通过 SW 代理下载到字幕内容');
+                }
+              } catch (swErr) {
+                console.warn('[YDQ] SW 代理下载失败:', swErr.message);
+              }
+            }
+
             if (!rawText || !rawText.trim()) {
               console.warn('[YDQ] 字幕下载内容为空');
               continue;
@@ -276,7 +329,7 @@ const SubtitleFetcher = {
               return subs;
             }
           } catch (err) {
-            console.warn('[YDQ] 字幕轨 [' + langCode + '] 下载异常:', err.message);
+            console.warn('[YDQ] 字幕轨 [' + langCode + '] 处理异常:', err.message);
           }
         }
       }
