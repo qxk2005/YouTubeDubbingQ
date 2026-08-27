@@ -117,18 +117,21 @@ const AudioPlayer = {
     // 查找当前时间对应的字幕
     const subIndex = this._findSubtitleAtTime(currentTimeMs);
 
-    if (subIndex === -1) return; // 当前时间没有字幕
+    if (subIndex === -1) return;
 
     // 已经朗读过这句了
     if (subIndex === this._lastSpokenIndex) return;
 
-    // 如果 TTS 正在朗读上一句且还没说完，不打断
-    // （让上一句自然说完，下一句在其 startMs 时触发）
-    if (TTSManager.isSpeaking() && TTSManager.getSpeakingIndex() >= 0) {
-      // 如果当前正在说的是上一句且距当前字幕开始不超过 500ms，等一等
+    // 如果 TTS 正在朗读上一句
+    if (TTSManager.isSpeaking()) {
       const speakingIdx = TTSManager.getSpeakingIndex();
-      if (speakingIdx === subIndex - 1 && currentTimeMs - this._subtitles[subIndex].startMs < 500) {
-        return;
+      // 上一句还在说，且当前字幕刚开始不久（<1秒），等一等让上一句说完
+      if (speakingIdx >= 0 && speakingIdx < subIndex) {
+        const elapsed = currentTimeMs - this._subtitles[subIndex].startMs;
+        if (elapsed < 1000) {
+          return; // 等上一句说完
+        }
+        // 滞后超过 1 秒，打断切到当前句
       }
     }
 
@@ -139,13 +142,12 @@ const AudioPlayer = {
 
   /**
    * 查找当前时间对应的字幕索引
-   * 返回 startMs 在当前时间之前且 endMs 在当前时间之后的字幕
+   * 在字幕的完整时间范围内都可触发（防重复由 _lastSpokenIndex 保证）
    */
   _findSubtitleAtTime(timeMs) {
     for (let i = 0; i < this._subtitles.length; i++) {
       const sub = this._subtitles[i];
-      // 在字幕开始后的 300ms 内触发（给一点容差）
-      if (timeMs >= sub.startMs && timeMs < sub.startMs + 300) {
+      if (timeMs >= sub.startMs && timeMs < sub.endMs) {
         return i;
       }
     }
