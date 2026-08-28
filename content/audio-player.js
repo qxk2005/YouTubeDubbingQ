@@ -1,11 +1,10 @@
 /**
- * YouTubeDubbingQ - 音频播放控制模块 (v5 - 逐句精确对齐)
+ * YouTubeDubbingQ - 音频播放控制模块 (v6 - 20秒黄金段落平稳调度)
  * 
  * 核心设计：
- * - 逐句触发 TTS（每条字幕到达时朗读对应中文）
- * - 精确时间同步：视频到达字幕 startMs 时触发朗读
- * - 防重复：每句只触发一次
- * - 音量直接赋值 + 持续维持
+ * - 监控视频播放进度，按 20 秒段落触发连贯中文配音
+ * - 拖拽进度条 (seek) 立即重新定位段落并平滑恢复朗读
+ * - 暂停/恢复/音量控制与 YouTube 原生播放器无缝协同
  */
 
 const AudioPlayer = {
@@ -16,12 +15,12 @@ const AudioPlayer = {
   _rafId: null,
   _volumeEnforceInterval: null,
   _targetVideoVolume: null,
-  _lastSpokenIndex: -1, // 上一次触发朗读的字幕索引
+  _lastSpokenSegmentId: -1, // 上一次触发朗读的段落 ID
 
   init(settings) {
     this._settings = settings || {};
     this._originalVolume = 1.0;
-    this._lastSpokenIndex = -1;
+    this._lastSpokenSegmentId = -1;
     this._targetVideoVolume = null;
   },
 
@@ -31,6 +30,7 @@ const AudioPlayer = {
 
   enable() {
     this._enabled = true;
+    this._lastSpokenSegmentId = -1;
     const video = document.querySelector('video');
     if (video) {
       this._originalVolume = video.volume;
@@ -49,7 +49,7 @@ const AudioPlayer = {
     this._restoreVideoVolume();
     if (typeof TTSManager !== 'undefined') TTSManager.stop();
     this._unbindVideoEvents();
-    this._lastSpokenIndex = -1;
+    this._lastSpokenSegmentId = -1;
   },
 
   _setVideoVolume(video, volume) {
@@ -82,7 +82,7 @@ const AudioPlayer = {
     if (video) video.volume = this._originalVolume;
   },
 
-  // ============= 逐句播放循环 =============
+  // ============= 段落式播放循环 =============
 
   _startPlaybackLoop() {
     if (this._rafId) cancelAnimationFrame(this._rafId);
@@ -92,7 +92,7 @@ const AudioPlayer = {
 
       const video = document.querySelector('video');
       if (video && !video.paused) {
-        this._checkAndSpeak(video.currentTime * 1000);
+        this._checkAndSpeakSegment(video.currentTime * 1000);
       }
 
       this._rafId = requestAnimationFrame(loop);
@@ -109,52 +109,26 @@ const AudioPlayer = {
   },
 
   /**
-   * 检查是否需要朗读当前字幕
+   * 检查并触发当前段落的配音
    */
-  _checkAndSpeak(currentTimeMs) {
-    if (typeof TTSManager === 'undefined') return;
+  _checkAndSpeakSegment(currentTimeMs) {
+    if (typeof SegmentManager === 'undefined' || typeof TTSManager === 'undefined') return;
 
-    // 查找当前时间对应的字幕
-    const subIndex = this._findSubtitleAtTime(currentTimeMs);
+    // 查找当前播放时间所在的 20 秒段落
+    const segment = SegmentManager.findSegmentAtTime(currentTimeMs);
+    if (!segment) return;
 
-    if (subIndex === -1) return;
-
-    // 已经朗读过这句了
-    if (subIndex === this._lastSpokenIndex) return;
-
-    // 如果 TTS 正在朗读上一句
-    if (TTSManager.isSpeaking()) {
-      const speakingIdx = TTSManager.getSpeakingIndex();
-      // 上一句还在说，且当前字幕刚开始不久（<1秒），等一等让上一句说完
-      if (speakingIdx >= 0 && speakingIdx < subIndex) {
-        const elapsed = currentTimeMs - this._subtitles[subIndex].startMs;
-        if (elapsed < 1000) {
-          return; // 等上一句说完
-        }
-        // 滞后超过 1 秒，打断切到当前句
-      }
+    // 如果当前段落已经在播放或已播放过，无需重复触发
+    if (segment.id === this._lastSpokenSegmentId) {
+      return;
     }
 
-    // 触发朗读
-    this._lastSpokenIndex = subIndex;
-    TTSManager.speakSubtitle(subIndex);
+    // 触发新段落的朗读
+    this._lastSpokenSegmentId = segment.id;
+    TTSManager.speakSegment(segment);
   },
 
-  /**
-   * 查找当前时间对应的字幕索引
-   * 在字幕的完整时间范围内都可触发（防重复由 _lastSpokenIndex 保证）
-   */
-  _findSubtitleAtTime(timeMs) {
-    for (let i = 0; i < this._subtitles.length; i++) {
-      const sub = this._subtitles[i];
-      if (timeMs >= sub.startMs && timeMs < sub.endMs) {
-        return i;
-      }
-    }
-    return -1;
-  },
-
-  // ============= 视频事件 =============
+  // ============= 视频事件处理 =============
 
   _bindVideoEvents() {
     const video = document.querySelector('video');
@@ -163,13 +137,24 @@ const AudioPlayer = {
     this._onPause = () => {
       if (typeof TTSManager !== 'undefined') TTSManager.stop();
     };
+
     this._onPlay = () => {
-      if (this._enabled) this._startPlaybackLoop();
+      if (this._enabled) {
+        // 恢复播放时重置当前段落以便重新就绪
+        this._lastSpokenSegmentId = -1;
+        this._startPlaybackLoop();
+      }
     };
+
     this._onSeeked = () => {
-      this._lastSpokenIndex = -1;
+      // 用户跳转进度，立即切断当前朗读并重置段落触发标记
+      this._lastSpokenSegmentId = -1;
       if (typeof TTSManager !== 'undefined') TTSManager.stop();
+      if (this._enabled && video && !video.paused) {
+        this._checkAndSpeakSegment(video.currentTime * 1000);
+      }
     };
+
     this._onVolumeChange = () => {
       if (this._enabled && this._targetVideoVolume !== null) {
         if (Math.abs(video.volume - this._targetVideoVolume) > 0.01) {

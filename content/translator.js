@@ -128,26 +128,29 @@ const Translator = {
    * @returns {Promise<Array<{index: number, zh: string}>>}
    */
   async _translateBatch(batch, config) {
-    const subtitleText = batch
+    const totalDurationSec = batch.reduce((sum, s) => sum + (s.endMs - s.startMs) / 1000, 0).toFixed(1);
+    const subtitleLines = batch
       .map((sub) => {
         const durationSec = ((sub.endMs - sub.startMs) / 1000).toFixed(1);
-        return `${sub.index}|${durationSec}s|${sub.text}`;
+        const maxChars = Math.max(4, Math.round(parseFloat(durationSec) * 3.6));
+        return `[#${sub.index}|${durationSec}s|建议≤${maxChars}字] ${sub.text}`;
       })
       .join('\n');
 
-    const prompt = `你是一个专业的视频字幕翻译员兼配音导演。请将以下视频字幕翻译成精炼流畅的简体中文。
+    const prompt = `你是一名资深的影视/纪录片国语配音导演兼翻译专家。请将以下 YouTube 视频英文字幕翻译为精炼、自然、流畅的简体中文配音稿。
 
-关键要求：
-1. 每条翻译的中文字数必须严格控制，使中文朗读时长匹配对应的时间窗口
-2. 参考标准：中文正常语速约每秒 4 个字（含标点）。例如 3.0s 的句子应翻译为约 12 个字
-3. 翻译要口语化、自然流畅，适合语音朗读，句间衔接要连贯
-4. 忠于原意但可以适当精简或改写以匹配时长
-5. 直接返回 JSON 数组格式，不要包含任何 Markdown 标记
+【核心配音要求（至关重要）】：
+1. 【字数严格压缩】：中文正常自然朗读语速为 3.5~3.8 字/秒。每条翻译的中文字数必须严格控制在给定的建议字数内，确保在对应时间内能以平稳自然的正常语速从容读完，绝不能过长导致配音滞后或需要快进！
+2. 【提炼去冗余】：果断剔除英文口头禅与无实质信息的填充词（例如：You know, Like, Actually, Basically, As you can see, I mean, Well, Right here 等），将冗长从句浓缩为干练地道的中文表达。
+3. 【段落连贯顺畅】：以 20 秒左右的整体语境为单位，前后句子衔接要通顺连贯，语气自然，适合专业播音员口播朗读，听感舒适。
+4. 【忠实原意】：在压缩字数的同时精准保留核心技术概念、数据与原意。
+5. 【纯 JSON 格式输出】：必须直接返回标准 JSON 数组，严禁任何 Markdown 标记或额外解释。
 
-字幕列表（格式：序号|时长|原文）：
-${subtitleText}
+【字幕清单（本批总时长约 ${totalDurationSec} 秒）】：
+${subtitleLines}
 
-返回格式：[{"index": 0, "zh": "翻译内容"}]`;
+【返回格式示例】：
+[{"index": ${batch[0].index}, "zh": "精炼中文配音内容"}]`;
 
     const url = `${config.apiBaseUrl.replace(/\/+$/, '')}/v1/chat/completions`;
 
@@ -163,11 +166,11 @@ ${subtitleText}
           {
             role: 'system',
             content:
-              '你是一个专业的视频字幕翻译员。请严格按照JSON数组格式返回翻译结果，不要输出任何其他内容。',
+              '你是一名专业的视频配音翻译员。必须严格按照JSON数组格式输出精炼中文翻译，确保每句字数与时长严格匹配。',
           },
           { role: 'user', content: prompt },
         ],
-        temperature: 0.3,
+        temperature: 0.25,
         max_tokens: 4096,
       }),
       signal: this._abortController?.signal,
@@ -198,7 +201,6 @@ ${subtitleText}
 
     // 解析 JSON 结果
     try {
-      // 尝试提取 JSON 数组（可能被 ```json ... ``` 包裹）
       const cleanContent = content.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
       const jsonMatch = cleanContent.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
@@ -219,9 +221,8 @@ ${subtitleText}
    */
   async _translateSingle(sub, config) {
     const url = `${config.apiBaseUrl.replace(/\/+$/, '')}/v1/chat/completions`;
-
-    const wordCount = sub.text.split(/\s+/).length;
-    const maxChars = Math.max(10, Math.ceil(wordCount * 1.5));
+    const durationSec = Math.max(1, (sub.endMs - sub.startMs) / 1000);
+    const maxChars = Math.max(4, Math.round(durationSec * 3.6));
 
     const response = await fetch(url, {
       method: 'POST',
@@ -234,14 +235,14 @@ ${subtitleText}
         messages: [
           {
             role: 'system',
-            content: '你是一个视频字幕翻译员。直接返回精炼的简体中文翻译结果，不要任何解释。',
+            content: '你是视频配音翻译员。请直接返回精炼、口语化的简体中文配音，不要任何解释。',
           },
           {
             role: 'user',
-            content: `将以下视频字幕翻译为精炼流畅的简体中文（尽量控制在${maxChars}个中文字符以内）：\n${sub.text}`,
+            content: `请将以下英文字幕翻译为精炼流畅的口语化中文（时长 ${durationSec.toFixed(1)} 秒，中文字数必须严格控制在 ${maxChars} 字以内）：\n${sub.text}`,
           },
         ],
-        temperature: 0.3,
+        temperature: 0.25,
         max_tokens: 256,
       }),
       signal: this._abortController?.signal,

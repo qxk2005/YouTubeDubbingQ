@@ -120,6 +120,11 @@
         }
       );
 
+      // 构建 20 秒黄金配音段落
+      if (typeof SegmentManager !== 'undefined') {
+        SegmentManager.segmentSubtitles(state.subtitles);
+      }
+
       Toolbar.showToast('字幕翻译完成！', 'success');
 
       // 如果配音也启用了，启动配音
@@ -148,7 +153,12 @@
     }
 
     try {
-      // 逐句朗读模式：直接启用 TTS 和播放器
+      // 确保 20 秒黄金段落已就绪
+      if (typeof SegmentManager !== 'undefined') {
+        SegmentManager.segmentSubtitles(state.subtitles);
+      }
+
+      // 启用 TTS 和播放器（20秒段落平稳朗读模式）
       await TTSManager.enable();
       AudioPlayer.enable();
 
@@ -165,6 +175,9 @@
   function stopDubbing() {
     TTSManager.disable();
     AudioPlayer.disable();
+    if (typeof SegmentManager !== 'undefined') {
+      SegmentManager.clear();
+    }
     Toolbar.showToast('配音已关闭', 'info');
   }
 
@@ -271,6 +284,9 @@
     TTSManager.disable();
     TTSManager.clearCache();
     AudioPlayer.disable();
+    if (typeof SegmentManager !== 'undefined') {
+      SegmentManager.clear();
+    }
 
     state.subtitles = [];
     state.initialized = false;
