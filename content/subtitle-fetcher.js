@@ -363,14 +363,110 @@ const SubtitleFetcher = {
     throw new Error('45 秒内未获取到字幕。请确认视频有 CC 字幕且 YouTube 页面已就绪');
   },
 
-  // ============= 全能解析引擎 =============
+  // ============= 全能解析与自然语义整句重构引擎 =============
 
   _parseRawSubtitle(rawText) {
     const t = rawText.trim();
-    if (t.startsWith('{')) try { const r = this._parseJSON3(JSON.parse(t)); if (r.length) return r; } catch (e) {}
-    if (t.startsWith('<')) try { const r = this._parseXML(t); if (r.length) return r; } catch (e) {}
-    if (t.includes('-->')) try { const r = this._parseVTT(t); if (r.length) return r; } catch (e) {}
+    let raw = [];
+    if (t.startsWith('{')) try { raw = this._parseJSON3(JSON.parse(t)); } catch (e) {}
+    else if (t.startsWith('<')) try { raw = this._parseXML(t); } catch (e) {}
+    else if (t.includes('-->')) try { raw = this._parseVTT(t); } catch (e) {}
+
+    if (raw && raw.length > 0) {
+      return this._mergeIntoNaturalSentences(raw);
+    }
     return [];
+  },
+
+  /**
+   * 将零散短碎的原始字幕 (1~2秒) 智能重构为 3.5s ~ 7.0s 的自然完整语义句子
+   * 从源头解决 TTS 语速来不及读完被掐断、漏读以及翻译不通顺的问题
+   */
+  _mergeIntoNaturalSentences(rawSubs) {
+    if (!rawSubs || rawSubs.length <= 1) return rawSubs;
+
+    const result = [];
+    let currentChunk = [rawSubs[0]];
+    let chunkStartMs = rawSubs[0].startMs;
+
+    for (let i = 1; i < rawSubs.length; i++) {
+      const prev = rawSubs[i - 1];
+      const curr = rawSubs[i];
+
+      const gap = curr.startMs - prev.endMs;
+      const accumulatedDuration = prev.endMs - chunkStartMs;
+      const projectedDuration = curr.endMs - chunkStartMs;
+
+      const prevText = (prev.text || '').trim();
+      const isSentenceEnd = /[.!?。！？]$/.test(prevText);
+      const isClauseEnd = /[,;，；:：]$/.test(prevText);
+
+      let shouldBreak = false;
+
+      // 规则 1: 说话停顿空白间隙大 (>= 1.0 秒)
+      if (gap >= 1000) {
+        shouldBreak = true;
+      }
+      // 规则 2: 遇到明确的句末标点 (. ! ?) 且已有一定时长 (>= 2.5s)
+      else if (isSentenceEnd && accumulatedDuration >= 2500) {
+        shouldBreak = true;
+      }
+      // 规则 3: 累计时长已达到 4.0 秒以上，且遇到从句停顿或微小停顿
+      else if (accumulatedDuration >= 4000 && (isClauseEnd || gap >= 300 || isSentenceEnd)) {
+        shouldBreak = true;
+      }
+      // 规则 4: 累计时长已达到黄金目标时长 (>= 5.5 秒)
+      else if (accumulatedDuration >= 5500) {
+        shouldBreak = true;
+      }
+      // 规则 5: 若加入下一句会超出最大安全时长 (7.5 秒)
+      else if (projectedDuration >= 7500 && accumulatedDuration >= 3000) {
+        shouldBreak = true;
+      }
+
+      if (shouldBreak) {
+        result.push(this._buildMergedCue(result.length, currentChunk));
+        currentChunk = [curr];
+        chunkStartMs = curr.startMs;
+      } else {
+        currentChunk.push(curr);
+      }
+    }
+
+    if (currentChunk.length > 0) {
+      result.push(this._buildMergedCue(result.length, currentChunk));
+    }
+
+    console.log(
+      `[YDQ] 智能语义重构: ${rawSubs.length} 条碎片字幕 → ${result.length} 条自然完整语义整句 (平均时长 ~${(
+        (rawSubs[rawSubs.length - 1].endMs - rawSubs[0].startMs) /
+        1000 /
+        Math.max(1, result.length)
+      ).toFixed(1)}s)`
+    );
+
+    return result;
+  },
+
+  /**
+   * 构建合并后的单条自然完整句子
+   */
+  _buildMergedCue(index, chunk) {
+    const startMs = chunk[0].startMs;
+    const endMs = chunk[chunk.length - 1].endMs;
+    const combinedText = chunk
+      .map((s) => (s.text || '').trim())
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ');
+
+    return {
+      index,
+      startMs,
+      endMs,
+      text: combinedText,
+      zhText: '',
+    };
   },
 
   _parseJSON3(data) {

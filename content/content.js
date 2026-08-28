@@ -215,6 +215,8 @@
           Toolbar.showProgress(translated, total);
           TranscriptPanel.updateCues(state.subtitles);
           TranscriptPanel.updateStatus(status);
+          TTSManager.setSubtitles(state.subtitles);
+          AudioPlayer.setSubtitles(state.subtitles);
 
           const pct = status ? status.progressPct : Math.round((translated / total) * 100);
           if (pct < 100) {

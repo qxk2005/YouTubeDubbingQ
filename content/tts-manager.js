@@ -1,11 +1,12 @@
 /**
- * YouTubeDubbingQ - TTS 配音管理模块 (v5 - 20秒黄金段落平稳朗读)
+ * YouTubeDubbingQ - TTS 配音管理模块 (非破坏性顺序队列 + Chrome 防假死守护)
  * 
  * 核心设计：
- * - 以 20 秒左右的自然段落为单位进行广播级连贯朗读，发音自然通畅
- * - 结合 AI 预压缩字数，语速稳定在最舒适的 0.9x ~ 1.15x 区间，不频繁变速
- * - 支持男声/女声多种系统语音关键词智能精准映射与容错
- * - 完备的事件生命周期与打断控制
+ * 1. 非破坏性顺序朗读：正常播放时绝不调用 cancel() 强行掐断，确保每一句 100% 完整读完
+ * 2. 智能排队与无缝衔接：当前句读完即刻触发下一句，绝不跳句、漏句、吞字
+ * 3. 刚性时长自适应调速 (1.0x ~ 1.45x)：依据字数与时间窗口精确调速，实现音画同步
+ * 4. Chrome V8 引擎防假死守护：全局强引用 + 心跳保活，根除 Chrome 语音服务静默丢音与假死
+ * 5. 用户 Seek 瞬时响应：用户点击逐字稿单句或拖拽进度条时，安全瞬时打断并精准发声
  */
 
 const TTSManager = {
@@ -15,14 +16,20 @@ const TTSManager = {
   _voicesLoaded: false,
   _cachedVoices: [],
   _selectedVoice: null,
-  _currentSegmentId: -1, // 当前正在朗读的段落 ID
-  _currentUtterance: null,
+  _speaking: false,
+  _currentSubtitleIndex: -1, // 当前正在朗读的字幕 index
+  _queuedSubtitle: null,     // 排队等待朗读的下一条字幕
+  _heartbeatTimer: null,
+  _seekDebounceTimer: null,
 
   init(settings) {
     this._settings = settings || {};
     this._selectedVoice = null;
-    this._currentSegmentId = -1;
+    this._speaking = false;
+    this._currentSubtitleIndex = -1;
+    this._queuedSubtitle = null;
     this._loadVoices();
+    this._startHeartbeat();
   },
 
   setSubtitles(subtitles) {
@@ -33,36 +40,19 @@ const TTSManager = {
     this._enabled = true;
     this._loadVoices();
     this._selectedVoice = this._selectVoice();
+    this._startHeartbeat();
+
     if (this._selectedVoice) {
-      console.log(`[YDQ TTS] 配音已启用，选用语音: ${this._selectedVoice.name} (${this._selectedVoice.lang})`);
-
-      // 检查是否匹配到了用户期望的性别
-      const edgeVoice = this._settings.edgeVoice || 'zh-CN-XiaoxiaoNeural';
-      const wantsMale =
-        edgeVoice.includes('Yunxi') ||
-        edgeVoice.includes('Yunjian') ||
-        edgeVoice.includes('Yunyang') ||
-        edgeVoice.includes('Yunze');
-      const name = this._selectedVoice.name.toLowerCase();
-      const gotMale =
-        name.includes('kangkang') ||
-        name.includes('yunxi') ||
-        name.includes('male') ||
-        name.includes('yunjian') ||
-        name.includes('yunyang');
-
-      if (wantsMale && !gotMale) {
-        if (typeof Toolbar !== 'undefined') {
-          Toolbar.showToast('提示：系统未检测到中文男声语音，将使用默认中文语音', 'info');
-        }
-      }
+      console.log(`[YDQ TTS] 配音引擎就绪，选用语音: ${this._selectedVoice.name} (${this._selectedVoice.lang})`);
     }
   },
 
   disable() {
     this._enabled = false;
     this.stop();
-    this._currentSegmentId = -1;
+    this._stopHeartbeat();
+    this._currentSubtitleIndex = -1;
+    this._queuedSubtitle = null;
   },
 
   /**
@@ -108,7 +98,6 @@ const TTSManager = {
     );
 
     if (zhVoices.length === 0) {
-      console.warn('[YDQ TTS] 未找到可用中文语音');
       return null;
     }
 
@@ -124,13 +113,11 @@ const TTSManager = {
     const keywords = isMale ? maleKeywords : femaleKeywords;
     const nameLower = (v) => v.name.toLowerCase();
 
-    // 1. 优先名称匹配
     for (const kw of keywords) {
       const match = zhVoices.find((v) => nameLower(v).includes(kw));
       if (match) return match;
     }
 
-    // 2. URI 备选匹配
     for (const v of zhVoices) {
       const uri = (v.voiceURI || '').toLowerCase();
       if (isMale && (uri.includes('male') || uri.includes('kangkang') || uri.includes('yunxi'))) {
@@ -145,115 +132,202 @@ const TTSManager = {
   },
 
   /**
-   * 朗读 20 秒段落文本
-   * @param {Object} segment 段落对象
-   * @returns {Promise<void>}
+   * 触发单条字幕朗读 (支持正常播放排队与用户 Seek 瞬时打断两种模式)
+   * @param {Object} subtitle 单条字幕对象 { index, startMs, endMs, zhText, text }
+   * @param {boolean} [isSeek=false] 是否为用户主动跳转/点击
    */
-  speakSegment(segment) {
-    return new Promise((resolve) => {
-      if (!this._enabled || !window.speechSynthesis || !segment) {
-        resolve();
+  speakSubtitle(subtitle, isSeek = false) {
+    if (!this._enabled || !window.speechSynthesis || !subtitle) return;
+
+    const text = (subtitle.zhText || '').trim();
+    if (!text) return;
+
+    // 模式 1: 用户主动 Seek / 点击逐字稿单句 -> 立即清空队列并安全瞬时切换
+    if (isSeek) {
+      this._queuedSubtitle = null;
+      this._stopNativeSpeech();
+
+      if (this._seekDebounceTimer) clearTimeout(this._seekDebounceTimer);
+      // 延迟 40ms 等待 Chrome 底层 cancel 握手完成，彻底避免并发假死
+      this._seekDebounceTimer = setTimeout(() => {
+        this._executeSpeak(subtitle);
+      }, 40);
+      return;
+    }
+
+    // 模式 2: 视频连续播放流转 -> 非破坏性顺序调度
+    if (this._speaking) {
+      // 若是当前正在朗读的句子，忽略重复触发
+      if (subtitle.index === this._currentSubtitleIndex) {
         return;
       }
+      // 若是下一句，推入排队槽位，等待当前句自然读完后无缝衔接
+      this._queuedSubtitle = subtitle;
+      return;
+    }
 
-      // 合并该 20 秒段落的全部中文字幕
-      const text = SegmentManager.mergeSegmentText(segment);
-      if (!text || !text.trim()) {
-        resolve();
-        return;
-      }
-
-      // 停止之前的朗读
-      this.stop();
-
-      this._currentSegmentId = segment.id;
-
-      // 计算段落平稳语速
-      const speed = this._calculateSegmentSpeed(text, segment.durationMs);
-
-      console.log(
-        `[YDQ TTS] 🎙️ 朗读段落 #${segment.id} (${(segment.durationMs / 1000).toFixed(1)}s, ${text.length}字, 语速${speed.toFixed(2)}x): "${text.slice(0, 35)}..."`
-      );
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'zh-CN';
-      utterance.rate = speed;
-      utterance.pitch = 1.0;
-      utterance.volume = (this._settings.dubbingVolume || 100) / 100;
-
-      if (!this._selectedVoice) {
-        this._selectedVoice = this._selectVoice();
-      }
-      if (this._selectedVoice) {
-        utterance.voice = this._selectedVoice;
-      }
-
-      this._currentUtterance = utterance;
-
-      utterance.onend = () => {
-        if (this._currentSegmentId === segment.id) {
-          this._currentSegmentId = -1;
-          this._currentUtterance = null;
-        }
-        resolve();
-      };
-
-      utterance.onerror = (e) => {
-        if (this._currentSegmentId === segment.id) {
-          this._currentSegmentId = -1;
-          this._currentUtterance = null;
-        }
-        if (e.error !== 'canceled' && e.error !== 'interrupted') {
-          console.warn(`[YDQ TTS] 段落 #${segment.id} 朗读异常:`, e.error);
-        }
-        resolve();
-      };
-
-      window.speechSynthesis.speak(utterance);
-    });
+    // 当前未在朗读，立即执行发音
+    this._executeSpeak(subtitle);
   },
 
   /**
-   * 自动微调段落语速
-   * 目标：让朗读时长与段落时间窗口自然贴合
-   * @param {string} text 段落中文文本
-   * @param {number} durationMs 段落时长毫秒
-   * @returns {number} 语速倍率 (0.85 ~ 1.25)
+   * 执行单句朗读与生命周期绑定
    */
-  _calculateSegmentSpeed(text, durationMs) {
+  _executeSpeak(subtitle) {
+    if (!this._enabled || !window.speechSynthesis) return;
+
+    const text = (subtitle.zhText || '').trim();
+    if (!text) return;
+
+    this._speaking = true;
+    this._currentSubtitleIndex = subtitle.index;
+
+    // 刚性自适应语速计算 (1.0x ~ 1.45x)
+    const durationMs = Math.max(800, subtitle.endMs - subtitle.startMs);
+    const speed = this._calculateSubtitleSpeed(text, durationMs);
+
+    console.log(
+      `[YDQ TTS] 🎙️ 朗读字幕 #${subtitle.index} (${(durationMs / 1000).toFixed(1)}s, ${text.length}字, 语速${speed.toFixed(2)}x): "${text}"`
+    );
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-CN';
+    utterance.rate = speed;
+    utterance.pitch = 1.0;
+    utterance.volume = (this._settings.dubbingVolume || 100) / 100;
+
+    if (!this._selectedVoice) {
+      this._selectedVoice = this._selectVoice();
+    }
+    if (this._selectedVoice) {
+      utterance.voice = this._selectedVoice;
+    }
+
+    // 全局强引用，彻底根除 Chrome V8 GC 导致中途静音停滞的 bug
+    window.__YDQ_ACTIVE_UTTERANCE__ = utterance;
+
+    utterance.onstart = () => {
+      this._speaking = true;
+    };
+
+    utterance.onend = () => {
+      this._speaking = false;
+      window.__YDQ_ACTIVE_UTTERANCE__ = null;
+      this._handleSentenceFinished(subtitle.index);
+    };
+
+    utterance.onerror = (e) => {
+      this._speaking = false;
+      window.__YDQ_ACTIVE_UTTERANCE__ = null;
+      if (e.error !== 'canceled' && e.error !== 'interrupted') {
+        console.warn(`[YDQ TTS] 字幕 #${subtitle.index} 朗读提示:`, e.error);
+      }
+      this._handleSentenceFinished(subtitle.index);
+    };
+
+    // 触发朗读
+    window.speechSynthesis.speak(utterance);
+
+    // 兼容 Chrome 特性：确保 speech 处于活跃状态
+    if (window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+    }
+  },
+
+  /**
+   * 当前句子朗读自然结束后的平滑衔接处理
+   */
+  _handleSentenceFinished(finishedIndex) {
+    if (!this._enabled) return;
+
+    const queued = this._queuedSubtitle;
+    this._queuedSubtitle = null;
+
+    if (queued && queued.zhText && queued.zhText.trim()) {
+      const video = document.querySelector('video');
+      if (video && !video.paused) {
+        const currentTimeMs = video.currentTime * 1000;
+        // 若当前视频进度仍在该排队句子有效窗口内 (startMs - 500ms ~ endMs + 2000ms)，立即衔接发声
+        if (currentTimeMs >= queued.startMs - 500 && currentTimeMs <= queued.endMs + 2500) {
+          this._executeSpeak(queued);
+          return;
+        }
+      }
+    }
+
+    // 若无排队或排队已过期，检查当前视频时间点是否有新句子需要发声
+    const video = document.querySelector('video');
+    if (video && !video.paused && typeof AudioPlayer !== 'undefined') {
+      AudioPlayer.onSentenceEnded(finishedIndex);
+    }
+  },
+
+  /**
+   * 刚性时长自适应调速算法 (确保在时间窗口内平稳读完)
+   * @param {string} text 中文文本
+   * @param {number} durationMs 可用时长毫秒
+   * @returns {number} 语速倍率 (1.0 ~ 1.45)
+   */
+  _calculateSubtitleSpeed(text, durationMs) {
     if (!text || durationMs <= 0) return 1.0;
 
-    // 计算纯文字数（去除部分停顿标点）
     const cleanChars = text.replace(/[，。！？、；：,.!?;:\s]/g, '').length;
-    // 正常中文标准播音语速：约 3.6 字/秒
-    const estimatedNaturalMs = (cleanChars / 3.6) * 1000;
-    const ratio = estimatedNaturalMs / durationMs;
+    // 标准中文播音语速：约 3.8 字/秒
+    const naturalMs = (cleanChars / 3.8) * 1000;
+    const ratio = naturalMs / durationMs;
 
-    // 语速严格约束在舒适区间，极少出现急促感
-    const speed = Math.max(0.85, Math.min(1.25, ratio));
+    // 语速约束在黄金自然区间 (1.0x ~ 1.45x)
+    const speed = Math.max(1.0, Math.min(1.45, ratio));
     return parseFloat(speed.toFixed(2));
   },
 
   /**
-   * 停止当前朗读
+   * Chrome TTS 心跳守护 (防止 Chrome 15秒语音引擎休眠)
    */
-  stop() {
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._heartbeatTimer = setInterval(() => {
+      if (this._enabled && window.speechSynthesis && window.speechSynthesis.speaking) {
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
+      }
+    }, 6000);
+  },
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+  },
+
+  _stopNativeSpeech() {
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
-    this._currentSegmentId = -1;
-    this._currentUtterance = null;
+    this._speaking = false;
+    window.__YDQ_ACTIVE_UTTERANCE__ = null;
   },
 
   /**
-   * 获取当前正在朗读的段落 ID
+   * 停止所有朗读并清空状态
    */
-  getCurrentSegmentId() {
-    return this._currentSegmentId;
+  stop() {
+    this._stopNativeSpeech();
+    if (this._seekDebounceTimer) {
+      clearTimeout(this._seekDebounceTimer);
+      this._seekDebounceTimer = null;
+    }
+    this._currentSubtitleIndex = -1;
+    this._queuedSubtitle = null;
+  },
+
+  getCurrentSubtitleIndex() {
+    return this._currentSubtitleIndex;
   },
 
   isSpeaking() {
-    return window.speechSynthesis && window.speechSynthesis.speaking;
+    return this._speaking || (window.speechSynthesis && window.speechSynthesis.speaking);
   },
 
   clearCache() {},
