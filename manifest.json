@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTubeDubbingQ",
-  "version": "2026.8.28.823",
+  "version": "2026.8.28.1155",
   "description": "YouTube 视频 AI 双语字幕翻译 + 实时中文配音",
   "icons": {
     "16": "icons/icon16.png",
@@ -38,9 +38,12 @@
       ],
       "js": [
         "lib/storage.js",
+        "content/translate-scheduler.js",
         "content/subtitle-fetcher.js",
         "content/translator.js",
         "content/subtitle-overlay.js",
+        "content/srt-exporter.js",
+        "content/transcript-panel.js",
         "content/segment-manager.js",
         "content/tts-manager.js",
         "content/audio-player.js",
@@ -72,5 +75,5 @@
       ]
     }
   ],
-  "version_name": "v2026.08.28.0823 (2026-08-28 08:23:28)"
+  "version_name": "v2026.08.28.1155 (2026-08-28 11:55:49)"
 }

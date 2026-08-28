@@ -287,21 +287,29 @@ const SubtitleFetcher = {
 
   // ============= 主入口 =============
 
-  async fetchSubtitles() {
+  async fetchSubtitles(onProgress) {
     const videoId = this.getVideoId();
     if (!videoId) throw new Error('未检测到视频 ID');
 
-    console.log('[YDQ] ===== 开始字幕获取 v8 (videoId: ' + videoId + ') =====');
+    console.log('[YDQ] ===== 开始字幕获取 v9 (videoId: ' + videoId + ') =====');
 
-    const maxRounds = 12;
-    const roundInterval = 1000;
+    const maxRounds = 30; // 最多轮询 30 轮 (~45 秒)
+    const startTime = Date.now();
 
     for (let round = 1; round <= maxRounds; round++) {
-      console.log('[YDQ] --- 第 ' + round + '/' + maxRounds + ' 轮 ---');
+      const elapsedSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
+      console.log('[YDQ] --- 第 ' + round + '/' + maxRounds + ' 轮 (' + elapsedSec + 's) ---');
+
+      if (onProgress) {
+        onProgress(`正在连接字幕源 (${elapsedSec}s)...`, elapsedSec);
+      }
 
       // 优先级 0: 拦截器缓存
       const intercepted = this._getInterceptedSubtitle();
-      if (intercepted) return intercepted;
+      if (intercepted) {
+        if (onProgress) onProgress(`已通过网络缓存获取字幕 (${intercepted.length}条)`, elapsedSec);
+        return intercepted;
+      }
 
       // 收集轨道
       let tracks = [];
@@ -315,8 +323,8 @@ const SubtitleFetcher = {
       // 优先级 3: Content Script Innertube API (第 2 轮起)
       if (!tracks.length && round >= 2) tracks = await this._fetchTracksViaInnertubeAPI(videoId);
 
-      // 优先级 4: SW 代理 Innertube API (第 5 轮起)
-      if (!tracks.length && round >= 5) tracks = await this._fetchTracksViaSW(videoId);
+      // 优先级 4: SW 代理 Innertube API (第 4 轮起)
+      if (!tracks.length && round >= 4) tracks = await this._fetchTracksViaSW(videoId);
 
       // 有轨道则尝试下载
       if (tracks.length > 0) {
@@ -330,21 +338,29 @@ const SubtitleFetcher = {
             (track.name.runs && track.name.runs[0] && track.name.runs[0].text))) || '';
           console.log('[YDQ] 下载字幕: [' + lang + '] ' + name);
 
+          if (onProgress) {
+            onProgress(`已检测到字幕轨 [${lang}]，正在下载解析...`, elapsedSec);
+          }
+
           const rawText = await this._downloadSubtitleContent(baseUrl);
           if (rawText) {
             const subs = this._parseRawSubtitle(rawText);
             if (subs && subs.length > 0) {
               console.log('[YDQ] ✓✓✓ 成功! ' + subs.length + ' 条字幕 (轨道: ' + lang + ')');
+              if (onProgress) {
+                onProgress(`字幕轨解析成功 (${subs.length} 条)`, elapsedSec);
+              }
               return subs;
             }
           }
         }
       }
 
+      const roundInterval = round <= 8 ? 1000 : 1500;
       if (round < maxRounds) await new Promise((r) => setTimeout(r, roundInterval));
     }
 
-    throw new Error('12 秒内未获取到字幕。请确认视频有 CC 字幕且 YouTube 已登录');
+    throw new Error('45 秒内未获取到字幕。请确认视频有 CC 字幕且 YouTube 页面已就绪');
   },
 
   // ============= 全能解析引擎 =============

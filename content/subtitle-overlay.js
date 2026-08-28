@@ -1,18 +1,25 @@
 /**
  * YouTubeDubbingQ - 字幕覆盖层渲染模块
  * 在 YouTube 视频播放器上渲染 Netflix 风格的双语字幕
+ * 增强交互：
+ * 1. 鼠标直接拖拽定位（播放器中心点百分比存储，全屏切换无缝适配）
+ * 2. 滚轮直接缩放中英文字号（16px ~ 72px）并即时持久化
+ * 3. 双击字幕框快速复位位置
  */
 
 const SubtitleOverlay = {
   // 状态
   _container: null,
+  _wrapper: null,
   _zhElement: null,
   _enElement: null,
+  _fontToast: null,
   _subtitles: [],
   _currentIndex: -1,
   _enabled: false,
   _rafId: null,
   _settings: null,
+  _fontToastTimer: null,
 
   /**
    * 初始化字幕覆盖层
@@ -20,9 +27,23 @@ const SubtitleOverlay = {
    */
   async init(settings) {
     this._settings = settings || {};
+    this._loadSavedInteractiveSettings();
     this._removeExisting();
     this._createOverlay();
     this._hideNativeSubtitles();
+  },
+
+  /**
+   * 读取用户本地拖拽位置与滚轮字号
+   */
+  _loadSavedInteractiveSettings() {
+    try {
+      const savedFont = JSON.parse(localStorage.getItem('ydq-sub-font') || 'null');
+      if (savedFont) {
+        if (savedFont.zhFontSize) this._settings.zhFontSize = savedFont.zhFontSize;
+        if (savedFont.enFontSize) this._settings.enFontSize = savedFont.enFontSize;
+      }
+    } catch (e) {}
   },
 
   /**
@@ -53,6 +74,15 @@ const SubtitleOverlay = {
     // 字幕包装器
     const wrapper = document.createElement('div');
     wrapper.id = 'ydq-subtitle-wrapper';
+    wrapper.className = 'ydq-subtitle-wrapper';
+    wrapper.title = '可拖拽移动位置，滚轮调节字号，双击复位';
+    this._wrapper = wrapper;
+
+    // 字号提示 Toast
+    const fontToast = document.createElement('div');
+    fontToast.className = 'ydq-sub-font-toast';
+    fontToast.id = 'ydq-sub-font-toast';
+    this._fontToast = fontToast;
 
     // 中文字幕行
     this._zhElement = document.createElement('div');
@@ -64,12 +94,149 @@ const SubtitleOverlay = {
     this._enElement.id = 'ydq-subtitle-en';
     this._enElement.className = 'ydq-subtitle-line ydq-en';
 
+    wrapper.appendChild(fontToast);
     wrapper.appendChild(this._zhElement);
     wrapper.appendChild(this._enElement);
     this._container.appendChild(wrapper);
     playerContainer.appendChild(this._container);
 
     this._applyStyles();
+    this._bindInteractiveEvents(playerContainer);
+  },
+
+  /**
+   * 绑定拖拽、滚轮缩放与双击复位事件
+   */
+  _bindInteractiveEvents(playerContainer) {
+    if (!this._wrapper || !playerContainer) return;
+
+    let isDragging = false;
+    let dragStartX = 0, dragStartY = 0;
+    let initialLeftPct = 50, initialTopPct = 86;
+
+    // 1. 拖拽定位 (以中心点在播放器中的宽高百分比存储)
+    this._wrapper.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      isDragging = true;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+
+      const playerRect = playerContainer.getBoundingClientRect();
+      const wrapperRect = this._wrapper.getBoundingClientRect();
+      const currentCenterX = wrapperRect.left + wrapperRect.width / 2 - playerRect.left;
+      const currentCenterY = wrapperRect.top + wrapperRect.height / 2 - playerRect.top;
+
+      initialLeftPct = (currentCenterX / playerRect.width) * 100;
+      initialTopPct = (currentCenterY / playerRect.height) * 100;
+
+      this._wrapper.classList.add('ydq-sub-dragging');
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!isDragging || !this._wrapper) return;
+      const playerRect = playerContainer.getBoundingClientRect();
+      if (playerRect.width === 0 || playerRect.height === 0) return;
+
+      const dx = e.clientX - dragStartX;
+      const dy = e.clientY - dragStartY;
+
+      const dxPct = (dx / playerRect.width) * 100;
+      const dyPct = (dy / playerRect.height) * 100;
+
+      const newCx = Math.max(5, Math.min(95, initialLeftPct + dxPct));
+      const newCy = Math.max(5, Math.min(95, initialTopPct + dyPct));
+
+      this._applyPositionPercent(newCx, newCy);
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        if (this._wrapper) {
+          this._wrapper.classList.remove('ydq-sub-dragging');
+          const playerRect = playerContainer.getBoundingClientRect();
+          const wrapperRect = this._wrapper.getBoundingClientRect();
+          const cx = ((wrapperRect.left + wrapperRect.width / 2 - playerRect.left) / playerRect.width) * 100;
+          const cy = ((wrapperRect.top + wrapperRect.height / 2 - playerRect.top) / playerRect.height) * 100;
+          localStorage.setItem('ydq-sub-pos', JSON.stringify({ cx: parseFloat(cx.toFixed(2)), cy: parseFloat(cy.toFixed(2)) }));
+        }
+      }
+    });
+
+    // 2. 滚轮调节字号
+    this._wrapper.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const delta = e.deltaY < 0 ? 1 : -1;
+      const curZh = this._settings.zhFontSize || 22;
+      const curEn = this._settings.enFontSize || 16;
+
+      const newZh = Math.min(72, Math.max(14, curZh + delta));
+      const newEn = Math.min(54, Math.max(10, Math.round(curEn + delta * 0.75)));
+
+      this._settings.zhFontSize = newZh;
+      this._settings.enFontSize = newEn;
+
+      if (this._zhElement) this._zhElement.style.fontSize = `${newZh}px`;
+      if (this._enElement) this._enElement.style.fontSize = `${newEn}px`;
+
+      localStorage.setItem('ydq-sub-font', JSON.stringify({ zhFontSize: newZh, enFontSize: newEn }));
+      this._showFontToast(`中 ${newZh}px / 英 ${newEn}px`);
+    });
+
+    // 3. 双击复位
+    this._wrapper.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      localStorage.removeItem('ydq-sub-pos');
+      this._applyDefaultPosition();
+      this._showFontToast('字幕位置已复位');
+    });
+  },
+
+  /**
+   * 应用百分比位置
+   */
+  _applyPositionPercent(cx, cy) {
+    if (!this._wrapper || !this._container) return;
+    this._container.style.bottom = 'auto';
+    this._container.style.top = '0';
+    this._container.style.left = '0';
+    this._container.style.width = '100%';
+    this._container.style.height = '100%';
+    this._container.style.pointerEvents = 'none';
+
+    this._wrapper.style.position = 'absolute';
+    this._wrapper.style.left = `${cx}%`;
+    this._wrapper.style.top = `${cy}%`;
+    this._wrapper.style.bottom = 'auto';
+    this._wrapper.style.transform = 'translate(-50%, -50%)';
+    this._wrapper.style.pointerEvents = 'auto';
+  },
+
+  /**
+   * 恢复默认位置
+   */
+  _applyDefaultPosition() {
+    if (!this._wrapper || !this._container) return;
+    const pos = (this._settings && this._settings.subtitlePosition) || 10;
+    this._applyPositionPercent(50, 100 - pos);
+  },
+
+  /**
+   * 临时显示字号或提示
+   */
+  _showFontToast(text) {
+    if (!this._fontToast) return;
+    this._fontToast.textContent = text;
+    this._fontToast.classList.add('ydq-visible');
+
+    if (this._fontToastTimer) clearTimeout(this._fontToastTimer);
+    this._fontToastTimer = setTimeout(() => {
+      this._fontToast?.classList.remove('ydq-visible');
+    }, 1200);
   },
 
   /**
@@ -94,7 +261,7 @@ const SubtitleOverlay = {
     this._enElement.style.fontWeight = s.enFontWeight || 'normal';
 
     // 背景样式
-    const wrapper = document.getElementById('ydq-subtitle-wrapper');
+    const wrapper = this._wrapper || document.getElementById('ydq-subtitle-wrapper');
     if (wrapper) {
       switch (s.subtitleBg) {
         case 'transparent':
@@ -105,7 +272,7 @@ const SubtitleOverlay = {
           break;
         case 'semi-transparent':
         default:
-          wrapper.style.backgroundColor = 'rgba(0, 0, 0, 0.6)';
+          wrapper.style.backgroundColor = 'rgba(0, 0, 0, 0.65)';
           break;
       }
     }
@@ -117,9 +284,16 @@ const SubtitleOverlay = {
     this._zhElement.style.textShadow = strokeStyle;
     this._enElement.style.textShadow = strokeStyle;
 
-    // 字幕位置
-    if (this._container) {
-      this._container.style.bottom = (s.subtitlePosition || 10) + '%';
+    // 定位处理
+    try {
+      const savedPos = JSON.parse(localStorage.getItem('ydq-sub-pos') || 'null');
+      if (savedPos && typeof savedPos.cx === 'number' && typeof savedPos.cy === 'number') {
+        this._applyPositionPercent(savedPos.cx, savedPos.cy);
+      } else {
+        this._applyDefaultPosition();
+      }
+    } catch (e) {
+      this._applyDefaultPosition();
     }
 
     // 显示模式
@@ -154,7 +328,6 @@ const SubtitleOverlay = {
    * 隐藏 YouTube 原生字幕
    */
   _hideNativeSubtitles() {
-    // 通过 CSS 隐藏原生字幕
     const style = document.createElement('style');
     style.id = 'ydq-hide-native-subs';
     style.textContent = `
@@ -167,7 +340,6 @@ const SubtitleOverlay = {
       }
     `;
 
-    // 移除旧的样式
     const existing = document.getElementById('ydq-hide-native-subs');
     if (existing) existing.remove();
 
@@ -252,14 +424,12 @@ const SubtitleOverlay = {
   _updateSubtitle(currentTimeMs) {
     if (!this._subtitles.length) return;
 
-    // 二分查找当前时间对应的字幕
     const index = this._findSubtitleIndex(currentTimeMs);
 
     if (index === this._currentIndex) return;
     this._currentIndex = index;
 
     if (index === -1) {
-      // 当前时间没有对应的字幕，隐藏
       this._hideSubtitle();
     } else {
       const sub = this._subtitles[index];
@@ -301,7 +471,7 @@ const SubtitleOverlay = {
   _showSubtitle(zhText, enText) {
     if (!this._zhElement || !this._enElement) return;
 
-    const wrapper = document.getElementById('ydq-subtitle-wrapper');
+    const wrapper = this._wrapper || document.getElementById('ydq-subtitle-wrapper');
     if (wrapper) {
       wrapper.classList.add('ydq-visible');
       wrapper.classList.remove('ydq-hidden');
@@ -319,7 +489,7 @@ const SubtitleOverlay = {
    * 隐藏字幕
    */
   _hideSubtitle() {
-    const wrapper = document.getElementById('ydq-subtitle-wrapper');
+    const wrapper = this._wrapper || document.getElementById('ydq-subtitle-wrapper');
     if (wrapper) {
       wrapper.classList.add('ydq-hidden');
       wrapper.classList.remove('ydq-visible');

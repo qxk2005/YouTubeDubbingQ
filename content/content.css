@@ -1,52 +1,90 @@
 /*
  * YouTubeDubbingQ - Content Script 样式
- * 字幕覆盖层、工具栏和提示的样式定义
+ * 字幕覆盖层、工具栏、右侧吸附逐字稿面板、播放器常驻状态胶囊与交互提示样式
  */
 
 /* ============================================
-   字幕覆盖层
+   字幕覆盖层与拖拽交互
    ============================================ */
 
 #ydq-subtitle-container {
   position: absolute;
-  bottom: 10%;
+  top: 0;
   left: 0;
-  right: 0;
+  width: 100%;
+  height: 100%;
   display: flex;
   justify-content: center;
   align-items: flex-end;
   pointer-events: none;
   z-index: 60;
-  padding: 0 5%;
 }
 
 #ydq-subtitle-wrapper {
+  position: absolute;
+  bottom: 10%;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 8px 16px;
-  border-radius: 8px;
-  background-color: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  padding: 8px 18px;
+  border-radius: 10px;
+  background-color: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   max-width: 90%;
-  transition: opacity 0.25s ease-in-out, transform 0.25s ease-in-out;
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: opacity 0.2s ease, border-color 0.2s ease;
+}
+
+#ydq-subtitle-wrapper:hover {
+  border-color: rgba(255, 221, 0, 0.4);
+}
+
+#ydq-subtitle-wrapper.ydq-sub-dragging {
+  cursor: grabbing !important;
+  border-color: #FFDD00 !important;
+  box-shadow: 0 8px 24px rgba(255, 221, 0, 0.25);
 }
 
 #ydq-subtitle-wrapper.ydq-visible {
   opacity: 1;
-  transform: translateY(0);
 }
 
 #ydq-subtitle-wrapper.ydq-hidden {
   opacity: 0;
-  transform: translateY(8px);
+}
+
+.ydq-sub-font-toast {
+  position: absolute;
+  top: -28px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: bold;
+  background: rgba(255, 221, 0, 0.95);
+  color: #000000;
+  border-radius: 4px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  white-space: nowrap;
+}
+
+.ydq-sub-font-toast.ydq-visible {
+  opacity: 1;
 }
 
 .ydq-subtitle-line {
   text-align: center;
-  line-height: 1.5;
+  line-height: 1.45;
   letter-spacing: 0.02em;
   word-break: break-word;
   white-space: pre-wrap;
@@ -67,6 +105,88 @@
   font-weight: normal;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 6px rgba(0, 0, 0, 0.6), 1px 1px 2px rgba(0, 0, 0, 0.8);
   opacity: 0.9;
+}
+
+/* ============================================
+   播放器常驻状态胶囊 (右上角)
+   ============================================ */
+
+.ydq-status-pill {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-family: "YouTube Sans", "Roboto", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-weight: 500;
+  z-index: 65;
+  pointer-events: none;
+  background: rgba(14, 14, 20, 0.88);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  color: #FFFFFF;
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.25s ease, transform 0.25s ease, background 0.25s ease, border-color 0.25s ease;
+}
+
+.ydq-status-pill.ydq-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.ydq-status-pill-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ydq-status-spinner {
+  width: 13px;
+  height: 13px;
+  color: #FFDD00;
+  animation: ydq-spin 1s linear infinite;
+}
+
+@keyframes ydq-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.ydq-status-pill-loading {
+  border-color: rgba(255, 221, 0, 0.4);
+}
+
+.ydq-status-pill-info {
+  border-color: rgba(100, 180, 255, 0.4);
+}
+
+.ydq-status-pill-success {
+  border-color: rgba(46, 204, 113, 0.5);
+  background: rgba(15, 30, 20, 0.92);
+  color: #2ecc71;
+}
+
+.ydq-status-pill-success .ydq-status-spinner {
+  color: #2ecc71;
+  animation: none;
+}
+
+.ydq-status-pill-error {
+  border-color: rgba(255, 80, 80, 0.5);
+  background: rgba(35, 15, 15, 0.92);
+  color: #FF8888;
+}
+
+.ydq-status-pill-error .ydq-status-spinner {
+  color: #FF8888;
+  animation: none;
 }
 
 /* ============================================
@@ -95,12 +215,12 @@
   align-items: center;
   gap: 4px;
   padding: 6px 10px;
-  background: rgba(15, 15, 20, 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(15, 15, 20, 0.9);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 1px rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
 .ydq-toolbar-brand {
@@ -126,11 +246,11 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 5px 10px;
+  padding: 5px 9px;
   background: transparent;
   border: none;
   border-radius: 8px;
-  color: rgba(255, 255, 255, 0.7);
+  color: rgba(255, 255, 255, 0.75);
   cursor: pointer;
   font-size: 12px;
   font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
@@ -139,17 +259,17 @@
 }
 
 .ydq-toolbar-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.12);
   color: #FFFFFF;
 }
 
 .ydq-toolbar-btn.ydq-active {
-  background: rgba(255, 221, 0, 0.15);
+  background: rgba(255, 221, 0, 0.18);
   color: #FFDD00;
 }
 
 .ydq-toolbar-btn.ydq-active:hover {
-  background: rgba(255, 221, 0, 0.25);
+  background: rgba(255, 221, 0, 0.28);
 }
 
 .ydq-toolbar-btn-sm {
@@ -157,8 +277,8 @@
 }
 
 .ydq-toolbar-icon {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   flex-shrink: 0;
 }
 
@@ -269,7 +389,7 @@
 
 .ydq-progress-bar {
   width: 60px;
-  height: 3px;
+  height: 4px;
   background: rgba(255, 255, 255, 0.15);
   border-radius: 2px;
   overflow: hidden;
@@ -285,9 +405,326 @@
 
 .ydq-progress-text {
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.6);
   white-space: nowrap;
   font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+/* ============================================
+   中英对照逐字稿面板 (右侧侧边栏原生吸附 & 播放器等高对齐)
+   ============================================ */
+
+.ydq-transcript-panel {
+  width: 100%;
+  height: 520px; /* 由 ResizeObserver 动态设为播放器精确像素高度 */
+  max-height: 100%;
+  margin-bottom: 16px;
+  position: sticky;
+  top: 64px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(18, 18, 24, 0.96);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+  overflow: hidden;
+  z-index: 50;
+  font-family: "YouTube Sans", "Roboto", "Microsoft YaHei", "PingFang SC", sans-serif;
+  color: #FFFFFF;
+}
+
+.ydq-transcript-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.ydq-transcript-header-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #FFFFFF;
+}
+
+.ydq-icon-transcript {
+  width: 16px;
+  height: 16px;
+  color: #FFDD00;
+}
+
+.ydq-tr-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: normal;
+}
+
+.ydq-tr-badge-translating {
+  background: rgba(255, 149, 0, 0.25);
+  color: #FFB340;
+  border: 1px solid rgba(255, 149, 0, 0.4);
+}
+
+.ydq-tr-badge-done {
+  background: rgba(46, 204, 113, 0.2);
+  color: #2ecc71;
+  border: 1px solid rgba(46, 204, 113, 0.4);
+}
+
+.ydq-transcript-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ydq-tr-header-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ydq-tr-header-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.ydq-tr-header-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #FFFFFF;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.ydq-tr-close-btn {
+  font-size: 13px;
+  font-weight: bold;
+  padding: 4px 7px;
+}
+
+.ydq-tr-close-btn:hover {
+  background: rgba(255, 70, 70, 0.35);
+  color: #FF8888;
+  border-color: rgba(255, 70, 70, 0.5);
+}
+
+/* 搜索栏 */
+.ydq-transcript-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.25);
+  flex-shrink: 0;
+}
+
+.ydq-search-input-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.ydq-search-input-wrapper:focus-within {
+  border-color: #FFDD00;
+  box-shadow: 0 0 6px rgba(255, 221, 0, 0.3);
+}
+
+.ydq-search-icon {
+  width: 13px;
+  height: 13px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+#ydq-tr-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 12px;
+  color: #FFFFFF;
+  font-family: inherit;
+}
+
+#ydq-tr-search-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.ydq-search-count {
+  font-size: 10px;
+  color: #FFDD00;
+  font-family: monospace;
+  white-space: nowrap;
+}
+
+.ydq-search-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ydq-search-nav-btn {
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.ydq-search-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #FFFFFF;
+}
+
+.ydq-search-clear-btn {
+  font-weight: bold;
+}
+
+/* 逐字稿列表区域 */
+.ydq-transcript-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+  scroll-behavior: smooth;
+}
+
+.ydq-transcript-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.ydq-transcript-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.ydq-transcript-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.ydq-tr-empty {
+  padding: 40px 20px;
+  text-align: center;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.ydq-transcript-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.ydq-transcript-row:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* 活跃跟播高亮句子 */
+.ydq-transcript-row.ydq-transcript-row-active {
+  background: rgba(255, 221, 0, 0.15) !important;
+  border-left: 4px solid #FFDD00 !important;
+  box-shadow: 0 2px 14px rgba(255, 221, 0, 0.15), inset 0 0 12px rgba(255, 221, 0, 0.06);
+}
+
+.ydq-transcript-row.ydq-transcript-row-active .ydq-tr-zh-text {
+  color: #FFE600 !important;
+  font-weight: 700;
+  text-shadow: 0 0 8px rgba(255, 221, 0, 0.35);
+}
+
+.ydq-transcript-row.ydq-transcript-row-active .ydq-tr-en-text {
+  color: #FFFFFF !important;
+  font-weight: 500;
+}
+
+.ydq-transcript-row.ydq-transcript-row-active .ydq-tr-time-tag {
+  background: #FFDD00 !important;
+  color: #000000 !important;
+  font-weight: 800;
+  box-shadow: 0 0 8px rgba(255, 221, 0, 0.5);
+}
+
+.ydq-transcript-row.ydq-tr-match-row {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ydq-transcript-row.ydq-tr-current-match {
+  background: rgba(255, 221, 0, 0.22);
+  outline: 1px solid rgba(255, 221, 0, 0.5);
+}
+
+.ydq-tr-time-tag {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: monospace;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ydq-tr-text-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ydq-tr-zh-text {
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: #FFDD00;
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.ydq-tr-en-text {
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.7);
+  word-break: break-word;
+}
+
+.ydq-highlight {
+  background: #FFDD00;
+  color: #000000;
+  padding: 0 2px;
+  border-radius: 2px;
+  font-weight: bold;
 }
 
 /* ============================================

@@ -1,7 +1,7 @@
 /**
  * YouTubeDubbingQ - AI 翻译模块
  * 通过 OpenAI 兼容 API 批量翻译英文字幕为中文
- * 翻译时约束长度以保证音画同步
+ * 引入 TranslateScheduler 优先级队列与重试机制，约束长度以保证音画同步
  */
 
 const Translator = {
@@ -11,12 +11,44 @@ const Translator = {
   // 翻译状态
   _translating: false,
   _abortController: null,
+  _scheduler: null,
+  _subtitles: [],
 
   /**
-   * 批量翻译字幕
+   * 获取当前调度与翻译状态
+   */
+  getStatus() {
+    if (!this._scheduler) {
+      const hasCues = this._subtitles && this._subtitles.length > 0;
+      const doneCount = hasCues ? this._subtitles.filter((s) => !!s.zhText).length : 0;
+      const totalCount = hasCues ? this._subtitles.length : 0;
+      const pct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+      return {
+        total: totalCount,
+        done: doneCount,
+        progressPct: pct,
+        allDone: totalCount > 0 && doneCount === totalCount,
+        allResolved: true,
+        translating: this._translating,
+      };
+    }
+    const st = this._scheduler.status();
+    st.translating = this._translating;
+    return st;
+  },
+
+  /**
+   * 是否已全部翻译完成
+   */
+  isComplete() {
+    return this.getStatus().allDone;
+  },
+
+  /**
+   * 批量翻译字幕 (采用智能优先调度器)
    * @param {Array} subtitles 字幕数组
    * @param {Object} config API 配置 {apiBaseUrl, apiKey, apiModel}
-   * @param {Function} onProgress 进度回调 (translated, total) => void
+   * @param {Function} onProgress 进度回调 (translatedCount, totalCount, status) => void
    * @returns {Promise<Array>} 带有 zhText 的字幕数组
    */
   async translateAll(subtitles, config, onProgress) {
@@ -24,100 +56,149 @@ const Translator = {
       throw new Error('请先配置 AI 翻译服务的 API 地址和 Key');
     }
 
+    this._subtitles = subtitles || [];
     this._translating = true;
     this._abortController = new AbortController();
 
     const videoId = SubtitleFetcher.getVideoId();
-    const batchSize = 25; // 每批翻译的字幕数量
+    const batchSize = 20; // 每批翻译的字幕数量
     const maxConcurrency = 3; // 最大并发数
-    let translated = 0;
 
-    // 检查缓存
-    const uncachedSubtitles = subtitles.filter((sub) => {
+    // 1. 先从内存缓存回填已翻译的字幕
+    let cachedCount = 0;
+    for (const sub of subtitles) {
       const cacheKey = `${videoId}_${sub.index}`;
       if (this._cache.has(cacheKey)) {
         sub.zhText = this._cache.get(cacheKey);
-        translated++;
-        return false;
+        cachedCount++;
       }
-      return true;
-    });
+    }
 
-    if (onProgress) onProgress(translated, subtitles.length);
-
-    if (uncachedSubtitles.length === 0) {
+    if (cachedCount === subtitles.length) {
       this._translating = false;
+      if (onProgress) onProgress(subtitles.length, subtitles.length, { progressPct: 100, allDone: true });
       return subtitles;
     }
 
-    // 分批
-    const batches = [];
-    for (let i = 0; i < uncachedSubtitles.length; i += batchSize) {
-      batches.push(uncachedSubtitles.slice(i, i + batchSize));
+    // 2. 将未翻译完的字幕按连续片段打组
+    const groups = [];
+    for (let i = 0; i < subtitles.length; i += batchSize) {
+      const batch = subtitles.slice(i, i + batchSize);
+      const startMs = batch[0].startMs;
+      const endMs = batch[batch.length - 1].endMs;
+      const isAlreadyFullyCached = batch.every((s) => !!s.zhText);
+
+      groups.push({
+        id: groups.length,
+        startMs,
+        endMs,
+        subtitles: batch,
+        isAlreadyDone: isAlreadyFullyCached,
+      });
     }
 
-    // 并发翻译
-    const processBatch = async (batch) => {
-      if (!this._translating) return;
+    // 3. 创建调度器
+    const scheduler = typeof TranslateScheduler !== 'undefined'
+      ? TranslateScheduler.create(groups, { retryCap: 4 })
+      : null;
+    this._scheduler = scheduler;
 
-      try {
-        const results = await this._translateBatch(batch, config);
+    // 标记已全部有缓存的群组为 DONE
+    if (scheduler) {
+      for (let i = 0; i < groups.length; i++) {
+        if (groups[i].isAlreadyDone) {
+          scheduler.record(i, true);
+        }
+      }
+    }
 
-        for (const result of results) {
-          const sub = batch.find((s) => s.index === result.index);
-          if (sub) {
-            sub.zhText = result.zh;
-            const cacheKey = `${videoId}_${sub.index}`;
-            this._cache.set(cacheKey, result.zh);
-            translated++;
+    const notifyProgress = () => {
+      if (!onProgress) return;
+      const doneSubs = subtitles.filter((s) => !!s.zhText).length;
+      const st = scheduler ? scheduler.status() : { progressPct: Math.round((doneSubs / subtitles.length) * 100) };
+      onProgress(doneSubs, subtitles.length, st);
+    };
+
+    notifyProgress();
+
+    // 4. 并发 Worker 调度执行
+    const runWorker = async () => {
+      while (this._translating) {
+        let groupIdx = -1;
+
+        if (scheduler) {
+          const video = document.querySelector('video');
+          const currentTimeSec = video ? video.currentTime : 0;
+          groupIdx = scheduler.pickNext(currentTimeSec);
+
+          if (groupIdx === -1) {
+            const st = scheduler.status();
+            if (st.allResolved) break;
+            await new Promise((r) => setTimeout(r, 200));
+            continue;
           }
+        } else {
+          break;
         }
 
-        if (onProgress) onProgress(translated, subtitles.length);
-      } catch (e) {
-        console.error('[YDQ] 批量翻译失败:', e);
-        // 对失败的批次逐条翻译
-        for (const sub of batch) {
-          if (!this._translating) break;
-          if (!sub.zhText) {
-            try {
-              const result = await this._translateSingle(sub, config);
-              sub.zhText = result;
-              const cacheKey = `${videoId}_${sub.index}`;
-              this._cache.set(cacheKey, result);
-              translated++;
-              if (onProgress) onProgress(translated, subtitles.length);
-            } catch (e2) {
-              console.error(`[YDQ] 字幕 #${sub.index} 翻译失败:`, e2);
-              sub.zhText = sub.text; // 翻译失败使用原文
-              translated++;
+        const group = groups[groupIdx];
+        const uncachedInGroup = group.subtitles.filter((s) => !s.zhText);
+
+        if (uncachedInGroup.length === 0) {
+          scheduler.record(groupIdx, true);
+          notifyProgress();
+          continue;
+        }
+
+        try {
+          const results = await this._translateBatch(uncachedInGroup, config);
+          let successCount = 0;
+
+          for (const result of results) {
+            const sub = uncachedInGroup.find((s) => s.index === result.index);
+            if (sub && result.zh) {
+              sub.zhText = result.zh;
+              this._cache.set(`${videoId}_${sub.index}`, result.zh);
+              successCount++;
             }
           }
+
+          if (successCount > 0) {
+            scheduler.record(groupIdx, true);
+          } else {
+            throw new Error('未解析到任何有效译文');
+          }
+        } catch (e) {
+          console.warn(`[YDQ] 批次 #${groupIdx} 翻译重试:`, e.message);
+          // 降级单条重试或记录失败
+          try {
+            for (const sub of uncachedInGroup) {
+              if (!this._translating) break;
+              if (!sub.zhText) {
+                const singleZh = await this._translateSingle(sub, config);
+                sub.zhText = singleZh;
+                this._cache.set(`${videoId}_${sub.index}`, singleZh);
+              }
+            }
+            scheduler.record(groupIdx, true);
+          } catch (singleErr) {
+            scheduler.record(groupIdx, false);
+          }
         }
+
+        notifyProgress();
       }
     };
 
-    // 控制并发
-    const queue = [...batches];
-    const running = [];
-
-    while (queue.length > 0 || running.length > 0) {
-      if (!this._translating) break;
-
-      while (running.length < maxConcurrency && queue.length > 0) {
-        const batch = queue.shift();
-        const promise = processBatch(batch).then(() => {
-          running.splice(running.indexOf(promise), 1);
-        });
-        running.push(promise);
-      }
-
-      if (running.length > 0) {
-        await Promise.race(running);
-      }
+    // 启动 3 个并发 Worker
+    const workers = [];
+    for (let w = 0; w < maxConcurrency; w++) {
+      workers.push(runWorker());
     }
 
+    await Promise.all(workers);
     this._translating = false;
+    notifyProgress();
     return subtitles;
   },
 
@@ -142,7 +223,7 @@ const Translator = {
 【核心配音要求（至关重要）】：
 1. 【字数严格压缩】：中文正常自然朗读语速为 3.5~3.8 字/秒。每条翻译的中文字数必须严格控制在给定的建议字数内，确保在对应时间内能以平稳自然的正常语速从容读完，绝不能过长导致配音滞后或需要快进！
 2. 【提炼去冗余】：果断剔除英文口头禅与无实质信息的填充词（例如：You know, Like, Actually, Basically, As you can see, I mean, Well, Right here 等），将冗长从句浓缩为干练地道的中文表达。
-3. 【段落连贯顺畅】：以 20 秒左右的整体语境为单位，前后句子衔接要通顺连贯，语气自然，适合专业播音员口播朗读，听感舒适。
+3. 【段落连贯顺畅】：以整体语境为单位，前后句子衔接要通顺连贯，语气自然，适合专业播音员口播朗读，听感舒适。
 4. 【忠实原意】：在压缩字数的同时精准保留核心技术概念、数据与原意。
 5. 【纯 JSON 格式输出】：必须直接返回标准 JSON 数组，严禁任何 Markdown 标记或额外解释。
 
@@ -194,7 +275,6 @@ ${subtitleLines}
     }
 
     const content = data.choices?.[0]?.message?.content?.trim();
-
     if (!content) {
       throw new Error('AI API 返回的选择内容为空');
     }

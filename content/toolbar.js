@@ -1,12 +1,16 @@
 /**
- * YouTubeDubbingQ - 视频内嵌浮动工具栏
- * 在 YouTube 视频播放器上显示快捷操作工具栏
+ * YouTubeDubbingQ - 视频内嵌浮动工具栏与常驻状态胶囊
+ * 在 YouTube 视频播放器上显示快捷操作工具栏与常驻状态指示
+ * 支持：双语字幕、中文配音、逐字稿面板、双语 SRT 导出、音量控制、常驻状态胶囊与翻译进度指示
  */
 
 const Toolbar = {
   _container: null,
+  _statusPill: null,
   _settings: null,
   _callbacks: {},
+  _transcriptOpen: false,
+  _statusPillTimer: null,
 
   /**
    * 初始化工具栏
@@ -14,6 +18,8 @@ const Toolbar = {
    * @param {Object} callbacks 回调函数
    * @param {Function} callbacks.onSubtitleToggle 字幕开关
    * @param {Function} callbacks.onDubbingToggle 配音开关
+   * @param {Function} callbacks.onTranscriptToggle 逐字稿开关
+   * @param {Function} callbacks.onExportSrt 导出 SRT
    * @param {Function} callbacks.onOriginalVolumeChange 原视频音量
    * @param {Function} callbacks.onDubbingVolumeChange 配音音量
    */
@@ -22,14 +28,50 @@ const Toolbar = {
     this._callbacks = callbacks || {};
     this._removeExisting();
     this._createToolbar();
+    this._createStatusPill();
   },
 
   /**
-   * 移除已有工具栏
+   * 移除已有工具栏与状态胶囊
    */
   _removeExisting() {
-    const existing = document.getElementById('ydq-toolbar');
-    if (existing) existing.remove();
+    const existingToolbar = document.getElementById('ydq-toolbar');
+    if (existingToolbar) existingToolbar.remove();
+
+    const existingPill = document.getElementById('ydq-status-pill');
+    if (existingPill) existingPill.remove();
+
+    if (this._statusPillTimer) {
+      clearTimeout(this._statusPillTimer);
+      this._statusPillTimer = null;
+    }
+  },
+
+  /**
+   * 创建常驻状态胶囊 (位于播放器右上角)
+   */
+  _createStatusPill() {
+    const playerContainer =
+      document.querySelector('#movie_player') ||
+      document.querySelector('.html5-video-player');
+    if (!playerContainer) return;
+
+    const pill = document.createElement('div');
+    pill.id = 'ydq-status-pill';
+    pill.className = 'ydq-status-pill';
+    pill.style.display = 'none';
+
+    pill.innerHTML = `
+      <div class="ydq-status-pill-icon">
+        <svg class="ydq-status-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <circle cx="12" cy="12" r="9" stroke-dasharray="28" stroke-dashoffset="10"/>
+        </svg>
+      </div>
+      <span class="ydq-status-pill-text" id="ydq-status-pill-text">正在准备...</span>
+    `;
+
+    playerContainer.appendChild(pill);
+    this._statusPill = pill;
   },
 
   /**
@@ -56,14 +98,14 @@ const Toolbar = {
   _getToolbarHTML() {
     return `
       <div class="ydq-toolbar-inner">
-        <div class="ydq-toolbar-brand">
+        <div class="ydq-toolbar-brand" title="YouTubeDubbingQ (YDQ)">
           <span class="ydq-toolbar-logo">YDQ</span>
         </div>
 
         <div class="ydq-toolbar-divider"></div>
 
         <!-- 字幕开关 -->
-        <button class="ydq-toolbar-btn" id="ydq-btn-subtitle" title="双语字幕">
+        <button class="ydq-toolbar-btn" id="ydq-btn-subtitle" title="双语字幕 (快捷键 C)">
           <svg class="ydq-toolbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="2" y="4" width="20" height="16" rx="2"/>
             <path d="M7 12h4M13 12h4M7 16h10"/>
@@ -72,7 +114,7 @@ const Toolbar = {
         </button>
 
         <!-- 配音开关 -->
-        <button class="ydq-toolbar-btn" id="ydq-btn-dubbing" title="中文配音">
+        <button class="ydq-toolbar-btn" id="ydq-btn-dubbing" title="实时中文配音">
           <svg class="ydq-toolbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
@@ -80,6 +122,28 @@ const Toolbar = {
             <line x1="8" y1="23" x2="16" y2="23"/>
           </svg>
           <span class="ydq-toolbar-label">配音</span>
+        </button>
+
+        <!-- 逐字稿面板 -->
+        <button class="ydq-toolbar-btn" id="ydq-btn-transcript" title="中英对照逐字稿面板">
+          <svg class="ydq-toolbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+          </svg>
+          <span class="ydq-toolbar-label">逐字稿</span>
+        </button>
+
+        <!-- 导出 SRT -->
+        <button class="ydq-toolbar-btn" id="ydq-btn-export-srt" title="导出双语 SRT 字幕">
+          <svg class="ydq-toolbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          <span class="ydq-toolbar-label">导出</span>
         </button>
 
         <div class="ydq-toolbar-divider"></div>
@@ -123,6 +187,50 @@ const Toolbar = {
   },
 
   /**
+   * 显示常驻状态胶囊
+   * @param {string} text 显示文本
+   * @param {string} type 'loading' | 'info' | 'success' | 'error'
+   * @param {number} autoHideMs 自动隐藏毫秒数 (0 为不隐藏)
+   */
+  showStatusPill(text, type = 'loading', autoHideMs = 0) {
+    if (!this._statusPill) {
+      this._createStatusPill();
+    }
+    if (!this._statusPill) return;
+
+    if (this._statusPillTimer) {
+      clearTimeout(this._statusPillTimer);
+      this._statusPillTimer = null;
+    }
+
+    const textEl = this._statusPill.querySelector('#ydq-status-pill-text');
+    if (textEl) textEl.textContent = text;
+
+    this._statusPill.className = `ydq-status-pill ydq-status-pill-${type} ydq-visible`;
+    this._statusPill.style.display = 'inline-flex';
+
+    if (autoHideMs > 0) {
+      this._statusPillTimer = setTimeout(() => {
+        this.hideStatusPill();
+      }, autoHideMs);
+    }
+  },
+
+  /**
+   * 隐藏常驻状态胶囊
+   */
+  hideStatusPill() {
+    if (this._statusPill) {
+      this._statusPill.classList.remove('ydq-visible');
+      setTimeout(() => {
+        if (this._statusPill && !this._statusPill.classList.contains('ydq-visible')) {
+          this._statusPill.style.display = 'none';
+        }
+      }, 300);
+    }
+  },
+
+  /**
    * 绑定事件
    */
   _bindEvents() {
@@ -150,6 +258,28 @@ const Toolbar = {
       });
     }
 
+    // 逐字稿开关
+    const btnTranscript = document.getElementById('ydq-btn-transcript');
+    if (btnTranscript) {
+      btnTranscript.addEventListener('click', () => {
+        this._transcriptOpen = !this._transcriptOpen;
+        btnTranscript.classList.toggle('ydq-active', this._transcriptOpen);
+        if (this._callbacks.onTranscriptToggle) {
+          this._callbacks.onTranscriptToggle(this._transcriptOpen);
+        }
+      });
+    }
+
+    // 导出 SRT
+    const btnExportSrt = document.getElementById('ydq-btn-export-srt');
+    if (btnExportSrt) {
+      btnExportSrt.addEventListener('click', () => {
+        if (this._callbacks.onExportSrt) {
+          this._callbacks.onExportSrt();
+        }
+      });
+    }
+
     // 音量面板切换
     const btnVolume = document.getElementById('ydq-btn-volume');
     const volumePanel = document.getElementById('ydq-volume-panel');
@@ -159,7 +289,6 @@ const Toolbar = {
         volumePanel.classList.toggle('ydq-visible');
       });
 
-      // 点击外部关闭
       document.addEventListener('click', () => {
         volumePanel.classList.remove('ydq-visible');
       });
@@ -209,7 +338,6 @@ const Toolbar = {
       });
       playerContainer.addEventListener('mouseleave', () => {
         this._container.classList.remove('ydq-toolbar-visible');
-        // 关闭音量面板
         const vp = document.getElementById('ydq-volume-panel');
         if (vp) vp.classList.remove('ydq-visible');
       });
@@ -222,12 +350,38 @@ const Toolbar = {
   _updateState() {
     const btnSubtitle = document.getElementById('ydq-btn-subtitle');
     const btnDubbing = document.getElementById('ydq-btn-dubbing');
+    const btnTranscript = document.getElementById('ydq-btn-transcript');
 
     if (btnSubtitle) {
       btnSubtitle.classList.toggle('ydq-active', !!this._settings.subtitleEnabled);
     }
     if (btnDubbing) {
       btnDubbing.classList.toggle('ydq-active', !!this._settings.dubbingEnabled);
+    }
+    if (btnTranscript) {
+      btnTranscript.classList.toggle('ydq-active', !!this._transcriptOpen);
+    }
+  },
+
+  /**
+   * 同步外部设置逐字稿按钮状态
+   */
+  setTranscriptActive(active) {
+    this._transcriptOpen = !!active;
+    const btnTranscript = document.getElementById('ydq-btn-transcript');
+    if (btnTranscript) {
+      btnTranscript.classList.toggle('ydq-active', this._transcriptOpen);
+    }
+  },
+
+  /**
+   * 同步外部设置字幕开关状态
+   */
+  setSubtitleActive(active) {
+    this._settings.subtitleEnabled = !!active;
+    const btnSubtitle = document.getElementById('ydq-btn-subtitle');
+    if (btnSubtitle) {
+      btnSubtitle.classList.toggle('ydq-active', this._settings.subtitleEnabled);
     }
   },
 
@@ -243,19 +397,19 @@ const Toolbar = {
 
     if (!progress) return;
 
-    if (translated >= total) {
+    if (total > 0 && translated >= total) {
       progress.style.display = 'none';
       return;
     }
 
     progress.style.display = 'flex';
-    const percent = Math.round((translated / total) * 100);
+    const percent = total > 0 ? Math.round((translated / total) * 100) : 0;
     if (fill) fill.style.width = percent + '%';
-    if (text) text.textContent = `翻译中 ${translated}/${total}`;
+    if (text) text.textContent = `翻译中 ${percent}% (${translated}/${total})`;
   },
 
   /**
-   * 显示状态提示
+   * 显示状态提示 (轻量 Toast)
    * @param {string} message 提示文本
    * @param {string} type 类型 'info' | 'success' | 'error'
    */
