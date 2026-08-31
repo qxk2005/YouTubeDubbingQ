@@ -1,11 +1,12 @@
 /**
- * YouTubeDubbingQ - 音频播放控制模块 (非破坏性顺序调度与音画毫秒级对齐)
+ * YouTubeDubbingQ - 音频播放控制模块 (智能双向弹性拟合 + 视频微变速同步 + 刚性追帧)
  * 
- * 核心设计：
- * 1. 连续播放时非破坏性流转：保证每一句完整读完，平滑衔接下一句，杜绝掐断与丢音
- * 2. Seek 瞬时响应：用户点击逐字稿单句或拖拽进度条时，瞬时切断旧音并精准播放所选句子
- * 3. 二分查找精准定位：毫秒级匹配视频播放时间点与对应字幕
- * 4. 暂停/恢复/音量控制与 YouTube 原生播放器无缝协同
+ * 核心特性：
+ * 1. 智能双向弹性拟合：当中文译文较长时，视频平滑微调降速 (0.85x~0.92x) 配合配音；遇到空白停顿微加速 (1.08x) 滑行
+ * 2. 刚性追帧熔断：若配音落后达到 2 段（lagCount >= 2），瞬时跳跃定位至当前画面字幕并立即发声
+ * 3. 连续播放非破坏性流转：保证每一句完整读完，平滑衔接下一句
+ * 4. 用户 Seek 瞬时响应：用户点击逐字稿单句或拖拽进度条时，瞬时切断旧音并精准播放所选句子
+ * 5. 暂停/关闭无损复位：随时还原原视频基础倍速与音量
  */
 
 const AudioPlayer = {
@@ -13,21 +14,22 @@ const AudioPlayer = {
   _subtitles: [],
   _settings: null,
   _originalVolume: 1.0,
+  _basePlaybackRate: 1.0, // 用户原生视频倍速基准
   _rafId: null,
   _volumeEnforceInterval: null,
   _targetVideoVolume: null,
-  _lastSpokenSubtitleIndex: -1, // 上一次触发朗读的字幕索引
+  _lastSpokenSubtitleIndex: -1,
 
   init(settings) {
     this._settings = settings || {};
     this._originalVolume = 1.0;
+    this._basePlaybackRate = 1.0;
     this._lastSpokenSubtitleIndex = -1;
     this._targetVideoVolume = null;
   },
 
   setSubtitles(subtitles) {
     this._subtitles = subtitles || [];
-    // 若当前正在播放的字幕已被翻译，且此前未发声，允许即时触发
     if (this._enabled) {
       const video = document.querySelector('video');
       if (video && !video.paused && !TTSManager.isSpeaking()) {
@@ -42,6 +44,7 @@ const AudioPlayer = {
     const video = document.querySelector('video');
     if (video) {
       this._originalVolume = video.volume;
+      this._basePlaybackRate = video.playbackRate || 1.0;
       const target = (this._settings.originalVolume ?? 20) / 100;
       this._setVideoVolume(video, target);
     }
@@ -59,6 +62,7 @@ const AudioPlayer = {
     this._stopPlaybackLoop();
     this._stopVolumeEnforcement();
     this._restoreVideoVolume();
+    this._restoreVideoPlaybackRate();
     if (typeof TTSManager !== 'undefined') TTSManager.stop();
     this._unbindVideoEvents();
     this._lastSpokenSubtitleIndex = -1;
@@ -94,7 +98,14 @@ const AudioPlayer = {
     if (video) video.volume = this._originalVolume;
   },
 
-  // ============= 逐句精准播放循环 =============
+  _restoreVideoPlaybackRate() {
+    const video = document.querySelector('video');
+    if (video && Math.abs(video.playbackRate - this._basePlaybackRate) > 0.01) {
+      video.playbackRate = this._basePlaybackRate;
+    }
+  },
+
+  // ============= 逐句精准播放与智能微变速循环 =============
 
   _startPlaybackLoop() {
     if (this._rafId) cancelAnimationFrame(this._rafId);
@@ -104,7 +115,9 @@ const AudioPlayer = {
 
       const video = document.querySelector('video');
       if (video && !video.paused) {
-        this._checkAndSpeakSubtitle(video.currentTime * 1000, false);
+        const currentTimeMs = video.currentTime * 1000;
+        this._checkAndSpeakSubtitle(currentTimeMs, false);
+        this._applyPaceSync(video, currentTimeMs);
       }
 
       this._rafId = requestAnimationFrame(loop);
@@ -121,32 +134,122 @@ const AudioPlayer = {
   },
 
   /**
-   * 检查并触发当前字幕句子的配音 (逐句精准音画对齐)
+   * 智能视频微变速同步引擎 (Smart Video Pace Sync)
+   * 双向弹性拟合：译文较长时视频微调降速配合配音，空白停顿微加速滑行
+   */
+  _applyPaceSync(video, currentTimeMs) {
+    if (!video || video.paused) return;
+    if (this._settings.autoPaceSync === false) {
+      this._restoreVideoPlaybackRate();
+      return;
+    }
+
+    let targetRate = this._basePlaybackRate;
+
+    if (TTSManager.isSpeaking()) {
+      const speakingIndex = TTSManager.getCurrentSubtitleIndex();
+      if (speakingIndex >= 0 && this._subtitles[speakingIndex]) {
+        const sub = this._subtitles[speakingIndex];
+        const timeRemainingMs = sub.endMs - currentTimeMs;
+
+        // 视频即将离开该字幕（剩余时间 < 800ms）但配音仍在朗读中：微调降速为发音争取时间
+        if (timeRemainingMs < 800) {
+          targetRate = this._basePlaybackRate * 0.86;
+        } else if (timeRemainingMs < 1400) {
+          targetRate = this._basePlaybackRate * 0.92;
+        } else {
+          targetRate = this._basePlaybackRate;
+        }
+      }
+    } else {
+      // 当前未在发声，检测距离下一句字幕是否有空白静音间隙
+      const nextSub = this._findNextSubtitle(currentTimeMs);
+      if (nextSub) {
+        const silenceGapMs = nextSub.startMs - currentTimeMs;
+        // 处于大空白间隙 (>500ms) 时，轻微加速滑行至下一句起点
+        if (silenceGapMs > 500) {
+          targetRate = this._basePlaybackRate * 1.08;
+        } else {
+          targetRate = this._basePlaybackRate;
+        }
+      } else {
+        targetRate = this._basePlaybackRate;
+      }
+    }
+
+    // 仅在倍速发生变化时更新 DOM，节约性能
+    if (Math.abs(video.playbackRate - targetRate) > 0.02) {
+      video.playbackRate = targetRate;
+    }
+  },
+
+  /**
+   * 查找当前时间点之后的下一条字幕
+   */
+  _findNextSubtitle(currentTimeMs) {
+    for (const sub of this._subtitles) {
+      if (sub.startMs > currentTimeMs) {
+        return sub;
+      }
+    }
+    return null;
+  },
+
+  /**
+   * 检查并触发当前字幕句子的配音 (带落后不超2段刚性追帧熔断)
    * @param {number} currentTimeMs 当前视频播放毫秒数
    * @param {boolean} [isSeek=false] 是否为用户主动跳转/点击
    */
   _checkAndSpeakSubtitle(currentTimeMs, isSeek = false) {
     if (typeof TTSManager === 'undefined' || !this._subtitles.length) return;
 
-    // 二分查找当前播放时间所在的单条字幕
-    const index = this._findSubtitleIndex(currentTimeMs);
-    if (index === -1) {
+    // 二分查找当前视频画面所在的字幕索引
+    const currentVideoIndex = this._findSubtitleIndex(currentTimeMs);
+    if (currentVideoIndex === -1) {
       return;
     }
 
-    // 连续播放且已经触发过该句时，无需重复触发
-    if (!isSeek && index === this._lastSpokenSubtitleIndex) {
+    const currentSub = this._subtitles[currentVideoIndex];
+    if (!currentSub || !currentSub.zhText || !currentSub.zhText.trim()) {
       return;
     }
 
-    const sub = this._subtitles[index];
-    if (!sub || !sub.zhText || !sub.zhText.trim()) {
+    // 1. 用户主动 Seek / 点击逐字稿单句
+    if (isSeek) {
+      this._lastSpokenSubtitleIndex = currentVideoIndex;
+      TTSManager.speakSubtitle(currentSub, true);
       return;
     }
 
-    // 记录并触发单句朗读
-    this._lastSpokenSubtitleIndex = index;
-    TTSManager.speakSubtitle(sub, isSeek);
+    // 2. 正常连续播放时的调度与落后检测
+    if (TTSManager.isSpeaking()) {
+      const speakingIndex = TTSManager.getCurrentSubtitleIndex();
+      if (speakingIndex >= 0) {
+        const lagCount = currentVideoIndex - speakingIndex;
+
+        // 核心规则：若配音朗读落后画面达到 2 段及以上 (lagCount >= 2)，触发刚性追赶熔断！
+        if (lagCount >= 2) {
+          console.warn(
+            `[YDQ Audio] ⚠️ 配音落后达到 ${lagCount} 段 (当前画面 #${currentVideoIndex}, 正在朗读 #${speakingIndex})，执行刚性追帧跳跃！`
+          );
+          this._lastSpokenSubtitleIndex = currentVideoIndex;
+          TTSManager.speakSubtitle(currentSub, true); // 强制切换至当前画面句子
+          return;
+        }
+
+        // 落后在 1 段以内，排入下一句等待队列
+        if (currentVideoIndex > speakingIndex) {
+          TTSManager.queueSubtitle(currentSub);
+        }
+      }
+      return;
+    }
+
+    // 3. 当前未在发声
+    if (currentVideoIndex !== this._lastSpokenSubtitleIndex) {
+      this._lastSpokenSubtitleIndex = currentVideoIndex;
+      TTSManager.speakSubtitle(currentSub, false);
+    }
   },
 
   /**
@@ -156,7 +259,15 @@ const AudioPlayer = {
     if (!this._enabled) return;
     const video = document.querySelector('video');
     if (video && !video.paused) {
-      this._checkAndSpeakSubtitle(video.currentTime * 1000, false);
+      const currentTimeMs = video.currentTime * 1000;
+      const nowIdx = this._findSubtitleIndex(currentTimeMs);
+      if (nowIdx !== -1 && nowIdx !== finishedIndex) {
+        const sub = this._subtitles[nowIdx];
+        if (sub && sub.zhText && sub.zhText.trim()) {
+          this._lastSpokenSubtitleIndex = nowIdx;
+          TTSManager.speakSubtitle(sub, false);
+        }
+      }
     }
   },
 
@@ -175,7 +286,6 @@ const AudioPlayer = {
     while (low <= high) {
       const mid = (low + high) >> 1;
       const sub = subs[mid];
-      // 容许提前 120ms 预触发，确保开口音画即刻同步
       if (timeMs >= sub.startMs - 120) {
         if (timeMs <= sub.endMs + 100) {
           return mid;
@@ -198,6 +308,7 @@ const AudioPlayer = {
     this._onPause = () => {
       if (typeof TTSManager !== 'undefined') TTSManager.stop();
       this._lastSpokenSubtitleIndex = -1;
+      this._restoreVideoPlaybackRate();
     };
 
     this._onPlay = () => {
@@ -209,8 +320,8 @@ const AudioPlayer = {
     };
 
     this._onSeeked = () => {
-      // 用户跳转进度或点击逐字稿单句，立即切断旧音频并瞬时朗读目标句
       this._lastSpokenSubtitleIndex = -1;
+      this._restoreVideoPlaybackRate();
       if (this._enabled && video && !video.paused) {
         this._checkAndSpeakSubtitle(video.currentTime * 1000, true);
       }
@@ -224,10 +335,18 @@ const AudioPlayer = {
       }
     };
 
+    this._onRateChange = () => {
+      // 记录用户手动在播放器菜单选择的基础倍速
+      if (!this._enabled) {
+        this._basePlaybackRate = video.playbackRate || 1.0;
+      }
+    };
+
     video.addEventListener('pause', this._onPause);
     video.addEventListener('play', this._onPlay);
     video.addEventListener('seeked', this._onSeeked);
     video.addEventListener('volumechange', this._onVolumeChange);
+    video.addEventListener('ratechange', this._onRateChange);
   },
 
   _unbindVideoEvents() {
@@ -237,6 +356,7 @@ const AudioPlayer = {
     if (this._onPlay) video.removeEventListener('play', this._onPlay);
     if (this._onSeeked) video.removeEventListener('seeked', this._onSeeked);
     if (this._onVolumeChange) video.removeEventListener('volumechange', this._onVolumeChange);
+    if (this._onRateChange) video.removeEventListener('ratechange', this._onRateChange);
   },
 
   updateSettings(newSettings) {

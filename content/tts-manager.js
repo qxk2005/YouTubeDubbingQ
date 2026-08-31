@@ -1,12 +1,11 @@
 /**
- * YouTubeDubbingQ - TTS 配音管理模块 (非破坏性顺序队列 + Chrome 防假死守护)
+ * YouTubeDubbingQ - TTS 配音管理模块 (自适应追赶调速 + 非破坏性排队 + Chrome 防假死守护)
  * 
- * 核心设计：
- * 1. 非破坏性顺序朗读：正常播放时绝不调用 cancel() 强行掐断，确保每一句 100% 完整读完
- * 2. 智能排队与无缝衔接：当前句读完即刻触发下一句，绝不跳句、漏句、吞字
- * 3. 刚性时长自适应调速 (1.0x ~ 1.45x)：依据字数与时间窗口精确调速，实现音画同步
- * 4. Chrome V8 引擎防假死守护：全局强引用 + 心跳保活，根除 Chrome 语音服务静默丢音与假死
- * 5. 用户 Seek 瞬时响应：用户点击逐字稿单句或拖拽进度条时，安全瞬时打断并精准发声
+ * 核心特性：
+ * 1. 动态追赶调速 (1.05x ~ 1.60x)：实时依据视频落后毫秒数自动调整语速，在 1~2 句话内追平进度
+ * 2. 刚性排队管理：非破坏性顺序发声，同时支持安全瞬时打断与跳帧追赶
+ * 3. Chrome V8 引擎防假死守护：全局强引用 + 6 秒心跳保活
+ * 4. 毫秒级音画同步：字数与时间窗口精确契合
  */
 
 const TTSManager = {
@@ -132,9 +131,17 @@ const TTSManager = {
   },
 
   /**
+   * 将字幕推入排队槽位
+   */
+  queueSubtitle(subtitle) {
+    if (!subtitle || !subtitle.zhText || !subtitle.zhText.trim()) return;
+    this._queuedSubtitle = subtitle;
+  },
+
+  /**
    * 触发单条字幕朗读 (支持正常播放排队与用户 Seek 瞬时打断两种模式)
    * @param {Object} subtitle 单条字幕对象 { index, startMs, endMs, zhText, text }
-   * @param {boolean} [isSeek=false] 是否为用户主动跳转/点击
+   * @param {boolean} [isSeek=false] 是否为用户主动跳转/点击或追帧跳跃
    */
   speakSubtitle(subtitle, isSeek = false) {
     if (!this._enabled || !window.speechSynthesis || !subtitle) return;
@@ -142,7 +149,7 @@ const TTSManager = {
     const text = (subtitle.zhText || '').trim();
     if (!text) return;
 
-    // 模式 1: 用户主动 Seek / 点击逐字稿单句 -> 立即清空队列并安全瞬时切换
+    // 模式 1: 用户主动 Seek / 点击逐字稿单句 / 追帧跳跃 -> 立即清空队列并安全瞬时切换
     if (isSeek) {
       this._queuedSubtitle = null;
       this._stopNativeSpeech();
@@ -157,11 +164,9 @@ const TTSManager = {
 
     // 模式 2: 视频连续播放流转 -> 非破坏性顺序调度
     if (this._speaking) {
-      // 若是当前正在朗读的句子，忽略重复触发
       if (subtitle.index === this._currentSubtitleIndex) {
         return;
       }
-      // 若是下一句，推入排队槽位，等待当前句自然读完后无缝衔接
       this._queuedSubtitle = subtitle;
       return;
     }
@@ -171,7 +176,7 @@ const TTSManager = {
   },
 
   /**
-   * 执行单句朗读与生命周期绑定
+   * 执行单句朗读与生命周期绑定 (带自适应追赶调速)
    */
   _executeSpeak(subtitle) {
     if (!this._enabled || !window.speechSynthesis) return;
@@ -182,9 +187,13 @@ const TTSManager = {
     this._speaking = true;
     this._currentSubtitleIndex = subtitle.index;
 
-    // 刚性自适应语速计算 (1.0x ~ 1.45x)
-    const durationMs = Math.max(800, subtitle.endMs - subtitle.startMs);
-    const speed = this._calculateSubtitleSpeed(text, durationMs);
+    // 获取当前视频播放时间点以计算追赶语速
+    const video = document.querySelector('video');
+    const currentTimeMs = video ? video.currentTime * 1000 : subtitle.startMs;
+
+    // 动态自适应追赶调速 (1.05x ~ 1.60x)
+    const speed = this._calculateCatchUpSpeed(text, subtitle, currentTimeMs);
+    const durationMs = Math.max(600, subtitle.endMs - subtitle.startMs);
 
     console.log(
       `[YDQ TTS] 🎙️ 朗读字幕 #${subtitle.index} (${(durationMs / 1000).toFixed(1)}s, ${text.length}字, 语速${speed.toFixed(2)}x): "${text}"`
@@ -235,7 +244,7 @@ const TTSManager = {
   },
 
   /**
-   * 当前句子朗读自然结束后的平滑衔接处理
+   * 当前句子朗读自然结束后的平滑衔接与追赶处理
    */
   _handleSentenceFinished(finishedIndex) {
     if (!this._enabled) return;
@@ -243,42 +252,56 @@ const TTSManager = {
     const queued = this._queuedSubtitle;
     this._queuedSubtitle = null;
 
+    const video = document.querySelector('video');
+    if (!video || video.paused) return;
+
+    const currentTimeMs = video.currentTime * 1000;
+
+    // 检查排队句子是否仍然有效（未严重落后）
     if (queued && queued.zhText && queued.zhText.trim()) {
-      const video = document.querySelector('video');
-      if (video && !video.paused) {
-        const currentTimeMs = video.currentTime * 1000;
-        // 若当前视频进度仍在该排队句子有效窗口内 (startMs - 500ms ~ endMs + 2000ms)，立即衔接发声
-        if (currentTimeMs >= queued.startMs - 500 && currentTimeMs <= queued.endMs + 2500) {
-          this._executeSpeak(queued);
-          return;
-        }
+      // 若当前视频进度仍在有效容差窗口内 (落后 < 2.5 秒)，无缝衔接发声
+      if (currentTimeMs <= queued.endMs + 2500) {
+        this._executeSpeak(queued);
+        return;
       }
+      console.log(`[YDQ TTS] ⏩ 排队句子 #${queued.index} 已超时落后，交给 AudioPlayer 追赶最新帧`);
     }
 
-    // 若无排队或排队已过期，检查当前视频时间点是否有新句子需要发声
-    const video = document.querySelector('video');
-    if (video && !video.paused && typeof AudioPlayer !== 'undefined') {
+    // 若无排队或排队已过期，通知 AudioPlayer 定位并朗读当前视频帧的最新句子
+    if (typeof AudioPlayer !== 'undefined') {
       AudioPlayer.onSentenceEnded(finishedIndex);
     }
   },
 
   /**
-   * 刚性时长自适应调速算法 (确保在时间窗口内平稳读完)
+   * 动态追赶调速算法 (Catch-Up Acceleration)
+   * 依据当前落后毫秒数自动调整语速，在 1~2 句话内快速追平进度
    * @param {string} text 中文文本
-   * @param {number} durationMs 可用时长毫秒
-   * @returns {number} 语速倍率 (1.0 ~ 1.45)
+   * @param {Object} subtitle 当前字幕对象
+   * @param {number} currentTimeMs 当前视频播放毫秒数
+   * @returns {number} 语速倍率 (1.05x ~ 1.60x)
    */
-  _calculateSubtitleSpeed(text, durationMs) {
-    if (!text || durationMs <= 0) return 1.0;
+  _calculateCatchUpSpeed(text, subtitle, currentTimeMs) {
+    if (!text) return 1.05;
 
     const cleanChars = text.replace(/[，。！？、；：,.!?;:\s]/g, '').length;
     // 标准中文播音语速：约 3.8 字/秒
     const naturalMs = (cleanChars / 3.8) * 1000;
-    const ratio = naturalMs / durationMs;
+    const nominalDurationMs = Math.max(600, subtitle.endMs - subtitle.startMs);
 
-    // 语速约束在黄金自然区间 (1.0x ~ 1.45x)
-    const speed = Math.max(1.0, Math.min(1.45, ratio));
-    return parseFloat(speed.toFixed(2));
+    let speed = naturalMs / nominalDurationMs;
+
+    // 追赶补偿机制：若发声时刻已落后字幕起点 (> 400ms)
+    if (currentTimeMs && currentTimeMs > subtitle.startMs + 400) {
+      const lagMs = currentTimeMs - subtitle.startMs;
+      const remainingWindowMs = Math.max(600, subtitle.endMs - currentTimeMs);
+      const catchUpSpeed = naturalMs / remainingWindowMs;
+      // 取基准速度与追赶速度的最大值
+      speed = Math.max(speed, catchUpSpeed);
+    }
+
+    // 限制在清晰自然且具备高追赶力的黄金区间 (1.05x ~ 1.60x)
+    return parseFloat(Math.max(1.05, Math.min(1.60, speed)).toFixed(2));
   },
 
   /**

@@ -52,6 +52,7 @@
 
     'original-volume': { key: 'originalVolume', type: 'range', display: 'original-volume-val', suffix: '%' },
     'dubbing-volume': { key: 'dubbingVolume', type: 'range', display: 'dubbing-volume-val', suffix: '%' },
+    'auto-pace-sync': { key: 'autoPaceSync', type: 'checkbox' },
   };
 
   // ============= 加载设置 =============
